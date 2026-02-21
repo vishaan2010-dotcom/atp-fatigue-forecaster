@@ -46,24 +46,26 @@ st.markdown("""
 def load_and_preprocess_data() -> pd.DataFrame:
     """Fetches ATP match data dynamically and engineers physiological fatigue features."""
     
-    # Dynamically fetch the current year to ensure the model never deprecates
     current_year = datetime.datetime.now().year
-    url = f"https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_matches_{current_year}.csv"
+    df = pd.DataFrame()
     
-    try:
-        logging.info(f"Fetching ATP data for {current_year}...")
-        df = pd.read_csv(url)
-    except urllib.error.HTTPError:
-        # Fallback in case the new year's file hasn't been created by Sackmann yet
-        logging.warning(f"{current_year} data unavailable. Falling back to {current_year - 1}...")
-        url = f"https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_matches_{current_year - 1}.csv"
+    # Enterprise Data Pipeline: Robust multi-year backward search
+    for year in range(current_year, 2020, -1):
+        url = f"https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_matches_{year}.csv"
         try:
+            logging.info(f"Attempting to fetch ATP data for {year}...")
             df = pd.read_csv(url)
+            logging.info(f"Successfully connected to the {year} dataset.")
+            break  # Exit the loop once we successfully grab the newest dataset
+        except urllib.error.HTTPError:
+            logging.warning(f"{year} dataset not yet published by upstream repository. Searching previous year...")
+            continue
         except Exception as e:
-            st.error(f"Fallback Data Pipeline Failure: {e}")
-            return pd.DataFrame()
-    except Exception as e:
-        st.error(f"Upstream Data Pipeline Failure: {e}")
+            logging.error(f"Unexpected data pipeline error: {e}")
+            continue
+
+    if df.empty:
+        st.error("Critical Pipeline Failure: Upstream repository is completely unreachable.")
         return pd.DataFrame()
 
     # Clean the dataset
