@@ -588,28 +588,53 @@ def generate_commentary(prob_p1, p1_stats, p2_stats, name1, name2, surface_name)
     else:
         lines.append(f"Essentially a coin flip — model gives **{winner}** a marginal edge at {win_prob:.0%}.")
 
-    # Fatigue differential commentary
+    # Fatigue differential commentary — tied to Cascade Stage 1
     load_diff = p1_stats['cum_mins_28d'] - p2_stats['cum_mins_28d']
     heavier = name1 if load_diff > 0 else name2
-    if abs(load_diff) > 150:
-        lines.append(f"**Fatigue signal**: {heavier} carries {abs(load_diff):.0f} more court minutes over 28 days — a meaningful physiological load difference.")
-    
-    # Rest days
-    if abs(p1_stats['days_since_last'] - p2_stats['days_since_last']) > 2:
-        more_rested = name1 if p1_stats['days_since_last'] > p2_stats['days_since_last'] else name2
-        lines.append(f"**Recovery advantage**: {more_rested} enters with more rest between matches.")
+    lighter = name2 if load_diff > 0 else name1
+    if abs(load_diff) > 200:
+        lines.append(
+            f"**Cascade Stage 1 signal**: {heavier} carries {abs(load_diff):.0f} more court minutes "
+            f"over 28 days. Per the Precision Degradation Cascade, this level of accumulated load "
+            f"predicts measurable knee flexion reduction and compensatory trunk recruitment — "
+            f"the earliest indicators of precision breakdown."
+        )
+    elif abs(load_diff) > 80:
+        lines.append(
+            f"**Load differential**: {heavier} has logged {abs(load_diff):.0f} more minutes in the past 28 days. "
+            f"A moderate Stage 1 fatigue signal — worth monitoring if this is a deep tournament run."
+        )
 
-    # Form
+    # Recovery — Stage 1-2
+    rest_diff = p1_stats['days_since_last'] - p2_stats['days_since_last']
+    more_rested = name1 if rest_diff > 0 else name2
+    if abs(rest_diff) > 2:
+        lines.append(
+            f"**Recovery advantage (Stage 1–2)**: {more_rested} enters with "
+            f"{abs(rest_diff):.0f} more rest days. Adequate recovery partially reverses "
+            f"lower-body fatigue accumulation before the cascade progresses."
+        )
+
+    # Form — Stage 3-5 downstream effects
     form_diff = p1_stats['win_pct_10'] - p2_stats['win_pct_10']
     if abs(form_diff) > 0.2:
         in_form = name1 if form_diff > 0 else name2
-        lines.append(f"**Form edge**: {in_form} shows significantly better recent win rate over the last 10 matches.")
+        lines.append(
+            f"**Form (Stage 3–5 proxy)**: {in_form}'s recent win rate suggests they are operating "
+            f"below the cascade threshold — precision and decision-making appear intact."
+        )
 
     # Surface note
     if surface_name == 'Clay':
-        lines.append("Clay courts extend rallies and accelerate physical attrition — fatigue features carry extra weight here.")
+        lines.append(
+            "**Surface factor**: Clay extends rally length and maximises cumulative load per match. "
+            "Fatigue features carry amplified predictive weight on this surface per the review's findings."
+        )
     elif surface_name == 'Grass':
-        lines.append("Grass rewards explosive athleticism; shorter points reduce cumulative fatigue effects.")
+        lines.append(
+            "**Surface factor**: Grass rewards explosive bursts over sustained endurance. "
+            "Shorter points compress the cascade timeline — Stage 5 cognitive effects may dominate over Stage 1–3."
+        )
 
     return "  \n".join(lines)
 
@@ -645,13 +670,25 @@ def render_calibration_chart(y_test, y_prob):
 def main():
     # Header
     st.markdown("""
-    <div style="border-bottom: 1px solid #2E2E2E; padding-bottom: 20px; margin-bottom: 28px;">
-        <div style="font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 4px; color: #7A7A7A; text-transform: uppercase; margin-bottom: 6px;">
-            Research-Grade ML Dashboard
+    <div style="border-bottom: 1px solid #2E2E2E; padding-bottom: 24px; margin-bottom: 28px;">
+        <div style="font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 4px; color: #C4622D; text-transform: uppercase; margin-bottom: 8px;">
+            Interactive Research Dashboard &nbsp;·&nbsp; Systematic Review Companion
         </div>
-        <h1 style="margin: 0; font-size: 3.2rem; letter-spacing: 4px;">ATP FATIGUE FORECASTER</h1>
-        <div style="font-family: 'DM Sans', sans-serif; font-size: 13px; color: #7A7A7A; margin-top: 6px;">
-            Physiological load modeling from real ATP scheduling data · JeffSackmann/tennis_atp
+        <h1 style="margin: 0; font-size: 3rem; letter-spacing: 4px; line-height: 1.1;">ATP FATIGUE FORECASTER</h1>
+        <div style="font-family: 'DM Sans', sans-serif; font-size: 13px; color: #9A9A9A; margin-top: 10px; max-width: 780px; line-height: 1.6;">
+            A machine learning implementation of the <em>Precision Degradation Cascade</em> model —
+            quantifying how physiological fatigue overrides baseline ATP ranking in professional match outcomes.
+        </div>
+        <div style="margin-top: 14px; display: flex; gap: 24px; flex-wrap: wrap;">
+            <div style="font-family: 'DM Mono', monospace; font-size: 11px; color: #7A7A7A;">
+                📄 &nbsp;<span style="color:#C4622D;">"The Breaking Point"</span> — Systematic Review, 2024
+            </div>
+            <div style="font-family: 'DM Mono', monospace; font-size: 11px; color: #7A7A7A;">
+                📊 &nbsp;Data: JeffSackmann/tennis_atp (4-year ATP match records)
+            </div>
+            <div style="font-family: 'DM Mono', monospace; font-size: 11px; color: #7A7A7A;">
+                🧠 &nbsp;Model: Calibrated Gradient Boosting · PRISMA-guided feature design
+            </div>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -735,47 +772,215 @@ def main():
     run = st.sidebar.button("Run Inference", type="primary", use_container_width=True)
 
     # ── TABS ──
-    tab1, tab2, tab3 = st.tabs(["MATCH INFERENCE", "MODEL DIAGNOSTICS", "METHODOLOGY"])
+    tab1, tab2, tab3, tab4 = st.tabs(["MATCH INFERENCE", "MODEL DIAGNOSTICS", "KEY FINDINGS", "METHODOLOGY"])
 
-    with tab3:
-        st.markdown('<div class="section-label">Research Foundation</div>', unsafe_allow_html=True)
+    with tab3:  # KEY FINDINGS
+        st.markdown('<div class="section-label">From the Systematic Review · 10 Studies · 847 Records Screened</div>', unsafe_allow_html=True)
+
+        # Abstract callout
+        st.markdown("""
+        <div style="background: #141414; border: 1px solid #2E2E2E; border-left: 4px solid #C4622D;
+                    border-radius: 0 8px 8px 0; padding: 24px 28px; margin-bottom: 28px;">
+            <div style="font-family:'DM Mono',monospace; font-size:10px; letter-spacing:3px; color:#C4622D; margin-bottom:12px; text-transform:uppercase;">
+                THE BREAKING POINT — Abstract
+            </div>
+            <div style="font-family:'DM Sans',sans-serif; font-size:14px; color:#C8C8C8; line-height:1.8;">
+                A systematic review of PubMed, Google Scholar, and SPORTDiscus (2002–2023) following PRISMA guidelines.
+                Ten studies (n ≈ 81–150 elite/sub-elite athletes) were analyzed. A distinct dissociation was found between
+                power and precision under fatigue: <strong style="color:#E8E8E8;">serve velocity declined only 0.4–3.1%</strong>,
+                while <strong style="color:#E8E8E8;">serve accuracy degraded 25–32% and groundstroke accuracy up to 69%</strong>.
+                Reaction time delayed 47–68 ms; decision-making quality declined 18–34%.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Finding 1: Velocity-Accuracy Paradox
+        st.markdown("### The Velocity–Accuracy Paradox")
+        col_va1, col_va2 = st.columns([3, 2])
+        with col_va1:
+            st.markdown("""
+            The most counterintuitive finding of the review: **fatigue does not slow players down — it makes them inaccurate.**
+
+            Across 6 studies, serve velocity under fatigued conditions fell by less than 3.1% — well within 
+            normal match variation and statistically non-significant in most protocols. Yet in the same conditions, 
+            serve accuracy dropped 25–32% and groundstroke accuracy collapsed by up to **69%** in high-intensity protocols 
+            (Davey et al., 2002).
+
+            This challenges the traditional definition of fatigue as "reduced force production" 
+            (Edwards, 1981). What actually limits elite performance is **neural inefficiency** — the degradation 
+            of fine motor control while gross power output remains preserved.
+            """)
+        with col_va2:
+            # Visual bar chart of the paradox
+            paradox_df = pd.DataFrame({
+                'Metric': ['Serve Velocity', 'Serve Accuracy', 'Groundstroke Accuracy'],
+                'Avg Decline (%)': [1.8, 28.5, 54.0],
+                'Type': ['Power', 'Precision', 'Precision']
+            })
+            fig_paradox = go.Figure()
+            colors = ['#4A7FC4', '#C4622D', '#A83232']
+            for i, row in paradox_df.iterrows():
+                fig_paradox.add_trace(go.Bar(
+                    x=[row['Avg Decline (%)']],
+                    y=[row['Metric']],
+                    orientation='h',
+                    marker_color=colors[i],
+                    name=row['Metric'],
+                    text=[f"-{row['Avg Decline (%)']:.1f}%"],
+                    textposition='outside',
+                    textfont=dict(family='DM Mono', size=12, color='#E8E8E8')
+                ))
+            fig_paradox.update_layout(
+                title=dict(text="Average Performance Decline Under Fatigue", font=dict(family='DM Mono', size=11, color='#7A7A7A')),
+                xaxis=dict(title="% Decline from Baseline", gridcolor='#2E2E2E', range=[0, 75], tickfont=dict(family='DM Mono', color='#7A7A7A')),
+                yaxis=dict(gridcolor='#2E2E2E', tickfont=dict(family='DM Mono', color='#E8E8E8')),
+                paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                showlegend=False, height=220, margin=dict(l=10, r=60, t=40, b=10)
+            )
+            st.plotly_chart(fig_paradox, use_container_width=True)
+
+        st.divider()
+
+        # Finding 2: Precision Degradation Cascade
+        st.markdown("### The Precision Degradation Cascade")
+        st.markdown("""
+        <div style="font-family:'DM Sans',sans-serif; font-size:14px; color:#C8C8C8; line-height:1.8; margin-bottom:20px;">
+        Synthesizing biomechanical and cognitive data across 10 studies, this review proposes a new theoretical framework 
+        explaining how elite performance degrades under fatigue — not all at once, but in a predictable 5-stage sequence.
+        </div>
+        """, unsafe_allow_html=True)
+
+        stages = [
+            ("Stage 1", "Lower-Body Fatigue", "#C4622D",
+             "Metabolic fatigue in the quadriceps and gastrocnemius causes reduced knee flexion (15–23°) and declining ground reaction force. This is the earliest measurable signal of cascade onset."),
+            ("Stage 2", "Kinetic Chain Compensation", "#B85A28",
+             "The CNS prioritizes force maintenance. Trunk rotation velocity increases 8–12% and shoulder internal rotation rises 9–11% to compensate for lost leg drive — preserving ball speed at a structural cost."),
+            ("Stage 3", "Precision Loss", "#A0491E",
+             "Compensatory proximal muscle recruitment destabilizes distal fine motor control (wrist/hand). Velocity holds, but placement accuracy collapses: serve accuracy −25–32%, groundstrokes −38–69%."),
+            ("Stage 4", "Range of Motion Restriction", "#8A3A16",
+             "Continued fatigue restricts hip rotation ROM (~13°), reducing topspin generation. Shots 'flatten out', land deeper, and become easier to anticipate — a tactical liability even if power is intact."),
+            ("Stage 5", "Cognitive Failure", "#6E2B0E",
+             "Systemic fatigue finally impairs executive function: reaction time delays of 47–68 ms, and decision-making quality declines 18–34%. Players either over-passify (fear of error) or over-aggress (low-% winners)."),
+        ]
+
+        for stage_id, stage_name, color, desc in stages:
+            st.markdown(f"""
+            <div style="display:flex; gap:16px; margin:10px 0; align-items:flex-start;">
+                <div style="background:{color}; border-radius:6px; padding:8px 14px; flex-shrink:0;
+                            font-family:'Bebas Neue',sans-serif; font-size:1rem; letter-spacing:2px;
+                            color:white; min-width:80px; text-align:center;">
+                    {stage_id}
+                </div>
+                <div style="background:#1C1C1C; border:1px solid #2E2E2E; border-radius:6px;
+                            padding:12px 18px; flex:1;">
+                    <div style="font-family:'Bebas Neue',sans-serif; font-size:1.1rem; letter-spacing:2px;
+                                color:#E8E8E8; margin-bottom:4px;">{stage_name.upper()}</div>
+                    <div style="font-family:'DM Sans',sans-serif; font-size:13px; color:#A0A0A0; line-height:1.6;">
+                        {desc}
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown("""
+        <div class="warning-bar" style="margin-top:16px;">
+            ⚡ This cascade is the theoretical foundation for the ML model's feature design. 
+            Court minutes in 7/14/28-day windows operationalize Stage 1 load accumulation. 
+            Days since last match captures Stage 1–2 recovery. Rolling win rates reflect Stage 3–5 downstream performance effects.
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.divider()
+
+        # Finding 3: Biomechanics table
+        st.markdown("### Biomechanical Adaptations Under Fatigue")
+        bio_df = pd.DataFrame({
+            'Variable': ['Knee Flexion', 'Trunk Rotation', 'Shoulder Internal Rotation', 'Hip Rotation ROM'],
+            'Change': ['−15 to −23°', '+8 to +12%', '+9 to +11%', '−~13°'],
+            'Implication': [
+                'Reduced ground reaction force; loss of primary power source',
+                'Compensatory mechanism to maintain velocity; increases spinal stress',
+                'Increases load on glenohumeral joint; elevated injury risk',
+                'Limits topspin generation; shots flatten and land long'
+            ]
+        })
+        st.dataframe(bio_df, use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.markdown("""
+        <div style="font-family:'DM Mono',monospace; font-size:11px; color:#5A5A5A; line-height:1.8;">
+        Sources: Davey et al. (2002), Hornery et al. (2007), Girard et al. (2008), Ferrauti et al. (2003), 
+        Lyons et al. (2013), Reid & Duffield (2014), Rota et al. (2014), Bilić et al. (2023) · PRISMA search: 847 records → 10 included
+        </div>
+        """, unsafe_allow_html=True)
+
+    with tab4:  # METHODOLOGY
+        st.markdown('<div class="section-label">Research Design & ML Implementation</div>', unsafe_allow_html=True)
+
         col_m, col_r = st.columns([3, 2])
         with col_m:
             st.markdown("""
-**The core hypothesis:** Traditional ATP forecasting systems over-weight static Elo ratings and 
-under-weight the physiological cost of match play. A higher-ranked player accumulating 
-800+ court minutes in 28 days may be a meaningfully worse bet than their ranking implies.
+**Research Question**
 
-**Why this matters:** Deep tournament runs and congested ATP calendars create scheduling 
-asymmetries that pure ranking models cannot capture. By computing *real* rolling physiological 
-load from historical match scheduling data, this model attempts to quantify the exact 
-inflection point where cumulative attrition overrides baseline skill.
+Traditional ATP forecasting systems over-weight static Elo ratings and ignore the physiological 
+cost of cumulative match play. This dashboard operationalizes the *Precision Degradation Cascade* 
+as a set of computable ML features, testing whether real scheduling-derived load data 
+improves match outcome prediction beyond ranking alone.
+
+**From Paper to Features**
+
+The systematic review identified court-time accumulation as the earliest measurable Stage 1 cascade signal. 
+This maps directly to the model's core features: cumulative minutes in 7, 14, and 28-day windows 
+computed from actual ATP scheduling records — not synthetic proxies. Recovery days capture 
+Stage 1–2 restoration. Rolling win rates reflect downstream Stage 3–5 performance effects.
+
+**Why Gradient Boosting over Random Forest**
+
+GBM builds trees sequentially, correcting residual errors. On tabular sports data with non-linear 
+fatigue thresholds (the "breaking point" concept), this outperforms RF's parallel ensemble approach. 
+Isotonic calibration ensures probability outputs are statistically reliable, not just directionally correct.
             """)
         with col_r:
             st.markdown("""
-**Key Feature Categories**
+**Feature Engineering**
 
-`LOAD FEATURES` — cumulative court minutes over 7, 14, and 28-day windows computed from actual ATP scheduling
+`LOAD (7/14/28d)` — cumulative court minutes in rolling windows from actual ATP scheduling
 
-`RECOVERY FEATURES` — days since last match, number of matches in prior 7 days
+`RECOVERY` — days since last match; matches played in prior 7 days
 
-`FORM FEATURES` — rolling win percentage over last 10 and 20 matches
+`FORM` — rolling win % over last 10 and 20 matches (real, not hardcoded)
 
-`TOURNAMENT FEATURES` — matches and minutes already accumulated in the current tournament draw
+`TOURNAMENT LOAD` — matches and minutes already played in the current draw
 
-`SURFACE` — court type encoding (clay, hard, grass, carpet)
+`SURFACE` — clay / hard / grass / carpet encoding
+
+**Validation Design**
+
+Temporal train/test split (80/20 by chronological order) to prevent future data leakage. 
+Stratified 5-fold cross-validation on training set. Reliability diagram to verify probability calibration.
+
+**Data Source**
+
+[JeffSackmann/tennis_atp](https://github.com/JeffSackmann/tennis_atp) — 4 years of ATP match records, ~15,000+ matches per year.
             """)
 
         st.divider()
         st.markdown("""
-**Data Source:** [JeffSackmann/tennis_atp](https://github.com/JeffSackmann/tennis_atp) — comprehensive ATP match-level records
+**Limitations (mirroring the paper)**
 
-**Model:** Calibrated Gradient Boosting with isotonic regression probability calibration
+Heterogeneity in how the ATP records match duration (some matches lack minute data) 
+mirrors the measurement heterogeneity that prevented formal meta-analysis in the systematic review. 
+Additionally, the model captures scheduling load but cannot directly measure the biomechanical 
+variables (knee flexion, trunk rotation) that Stage 1–3 of the cascade describes — these remain latent signals approximated by court time.
 
-**Validation:** Time-aware train/test split (train on earlier seasons, evaluate on later seasons) to prevent temporal leakage
+**Citation**
+
+*"The Breaking Point: A Systematic Review of Physiological and Cognitive Fatigue Effects on 
+Professional Tennis Performance"* (2024). PRISMA-compliant systematic review of 10 studies, 847 screened records. 
+PubMed · Google Scholar · SPORTDiscus. Boolean search: ("Tennis" OR "Racquet Sport\*") AND ("Fatigue" OR "Exhaustion") AND ("Biomechanics" OR "Accuracy" OR "Cognitive").
         """)
 
-    with tab2:
+    with tab2:  # MODEL DIAGNOSTICS
         st.markdown('<div class="section-label">Model Architecture & Evaluation</div>', unsafe_allow_html=True)
 
         c1, c2, c3, c4, c5 = st.columns(5)
@@ -807,7 +1012,7 @@ inflection point where cumulative attrition overrides baseline skill.
         st.dataframe(df_features[feature_cols + ['p1_wins']].tail(8), use_container_width=True)
         st.caption(f"Each row is a real ATP match with pre-match rolling features computed from prior scheduling history. {len(df_features):,} total training rows.")
 
-    with tab1:
+    with tab1:  # MATCH INFERENCE
         # Pre-match comparison
         st.markdown('<div class="section-label">Pre-Match Analysis</div>', unsafe_allow_html=True)
 
