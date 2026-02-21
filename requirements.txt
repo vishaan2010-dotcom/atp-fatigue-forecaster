@@ -1,20 +1,5 @@
-# ==========================================
-# ATP Fatigue Forecaster - Dependencies
-# Python Version: >= 3.10
-# ==========================================
-
-# --- Core Web Framework ---
-streamlit>=1.50.0       # Application UI & Caching
-
-# --- Data Engineering & Mathematics ---
-pandas>=2.1.0           # Data Manipulation
-numpy>=1.26.0           # Matrix Operations
-
-# --- Machine Learning Engine ---
-scikit-learn>=1.6.0     # Random Forest & Inference Metrics
-
-# --- Advanced Visualization ---
-plotly>=5.18.0          # Interactive Radar & Feature Matrices
-
-# --- CI/CD & Testing (GitHub Actions) ---
-pytest>=8.0.0           # Automated Unit Testing
+streamlit>=1.32.0
+pandas>=2.0.0
+numpy>=1.26.0
+plotly>=5.18.0
+scikit-learn>=1.4.0

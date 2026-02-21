@@ -209,7 +209,7 @@ footer { visibility: hidden; }
 # ─────────────────────────────────────────────
 # DATA LOADING
 # ─────────────────────────────────────────────
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def load_raw_data(years: int = 5) -> pd.DataFrame:
     """
     Load multiple years of ATP match data from JeffSackmann/tennis_atp.
