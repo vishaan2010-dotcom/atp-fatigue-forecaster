@@ -54,7 +54,20 @@ X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_
 
 model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
 model.fit(X_train, y_train)
+# Test the model and calculate accuracy
+y_pred = model.predict(X_test)
+model_accuracy = accuracy_score(y_test, y_pred)
 
+with st.expander("📚 Research Methodology & Context"):
+    st.markdown("""
+    This model's feature engineering is directly derived from the systematic review: 
+    **THE BREAKING POINT: A SYSTEMATIC REVIEW OF PHYSIOLOGICAL AND COGNITIVE FATIGUE EFFECTS ON PROFESSIONAL TENNIS PERFORMANCE**. 
+    
+    Traditional tennis analytics often rely purely on Elo ratings or ATP rankings. However, the realities of high-stakes tournament play—such as grinding through a USTA Level 2 Nationals—demonstrate that physiological attrition significantly alters baseline probabilities. This application quantifies that fatigue as a core predictive feature.
+    """)
+
+st.metric(label="Model Accuracy (Test Data)", value=f"{model_accuracy:.1%}")
+st.divider()
 # Sidebar UI
 st.sidebar.header("Match Setup")
 p1_rank = st.sidebar.number_input("Player 1 Rank", min_value=1, max_value=500, value=10)
