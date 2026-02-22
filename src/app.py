@@ -798,7 +798,24 @@ def main():
     with st.spinner("Building player stats index..."):
         player_stats = build_player_stats(df_raw)
 
-    player_names = sorted(player_stats.keys())
+    player_names = sorted([k for k in player_stats.keys() if k != '__h2h__'])
+
+    # Data freshness indicator
+    df_raw['match_date'] = pd.to_datetime(df_raw['tourney_date'], format='%Y%m%d', errors='coerce')
+    data_cutoff = df_raw['match_date'].dropna().max()
+    days_stale  = (pd.Timestamp.now() - data_cutoff).days
+    freshness_color = '#4A7C59' if days_stale <= 7 else '#C4622D' if days_stale > 21 else '#B8860B'
+    st.markdown(f"""
+    <div style="background:#141414; border:1px solid #2E2E2E; border-radius:6px;
+                padding:8px 16px; margin-bottom:16px; display:flex; align-items:center; gap:12px;">
+        <div style="width:8px; height:8px; border-radius:50%; background:{freshness_color}; flex-shrink:0;"></div>
+        <div style="font-family:'DM Mono',monospace; font-size:11px; color:#7A7A7A;">
+            Data current through <span style="color:#E8E8E8;">{data_cutoff.strftime('%B %d, %Y')}</span>
+            &nbsp;·&nbsp; {days_stale} days ago
+            &nbsp;·&nbsp; <span style="color:#7A7A7A;">Player stats reflect this snapshot — very recent matches may not be included</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     # Sidebar
     st.sidebar.markdown("""
