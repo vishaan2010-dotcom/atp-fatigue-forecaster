@@ -858,6 +858,12 @@ def main():
 
     st.sidebar.divider()
 
+    # Cache reset — solves stale model/feature mismatch issues
+    if st.sidebar.button("🔄 Clear Cache & Retrain", help="Use if you see a feature mismatch error"):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.rerun()
+
     if input_mode == "Player Lookup" and len(player_names) > 1:
         st.sidebar.markdown("**Player 1**")
         name1 = st.sidebar.selectbox("Select Player 1", player_names, index=0)
@@ -1246,31 +1252,49 @@ PubMed · Google Scholar · SPORTDiscus. Boolean search: ("Tennis" OR "Racquet S
         st.plotly_chart(render_radar(p1, p2, name1, name2), use_container_width=True)
 
         if run:
-            # Build input vector
-            input_row = [
-                p1['rank'], p2['rank'],
-                p1['cum_mins_7d'],  p2['cum_mins_7d'],
-                p1['cum_mins_14d'], p2['cum_mins_14d'],
-                p1['cum_mins_28d'], p2['cum_mins_28d'],
-                p1['surf_weighted_mins_28d'], p2['surf_weighted_mins_28d'],
-                p1['round_weighted_mins_28d'], p2['round_weighted_mins_28d'],
-                p1['matches_7d'],   p2['matches_7d'],
-                p1['days_since_last'], p2['days_since_last'],
-                p1['win_pct_10'],   p2['win_pct_10'],
-                p1['win_pct_20'],   p2['win_pct_20'],
-                p1['tourney_matches_before'], p2['tourney_matches_before'],
-                p1['tourney_mins_before'],    p2['tourney_mins_before'],
-                p1['h2h_win_pct'],  p2['h2h_win_pct'],
-                p1['opp_avg_rank_beaten'], p2['opp_avg_rank_beaten'],
-                surface_enc
-            ]
+            # Build input as a named dict — aligns with feature_cols regardless of order
+            input_dict = {
+                'p1_rank':                    p1['rank'],
+                'p2_rank':                    p2['rank'],
+                'p1_cum_mins_7d':             p1['cum_mins_7d'],
+                'p2_cum_mins_7d':             p2['cum_mins_7d'],
+                'p1_cum_mins_14d':            p1['cum_mins_14d'],
+                'p2_cum_mins_14d':            p2['cum_mins_14d'],
+                'p1_cum_mins_28d':            p1['cum_mins_28d'],
+                'p2_cum_mins_28d':            p2['cum_mins_28d'],
+                'p1_surf_weighted_mins_28d':  p1['surf_weighted_mins_28d'],
+                'p2_surf_weighted_mins_28d':  p2['surf_weighted_mins_28d'],
+                'p1_round_weighted_mins_28d': p1['round_weighted_mins_28d'],
+                'p2_round_weighted_mins_28d': p2['round_weighted_mins_28d'],
+                'p1_matches_7d':              p1['matches_7d'],
+                'p2_matches_7d':              p2['matches_7d'],
+                'p1_days_since_last':         p1['days_since_last'],
+                'p2_days_since_last':         p2['days_since_last'],
+                'p1_win_pct_10':              p1['win_pct_10'],
+                'p2_win_pct_10':              p2['win_pct_10'],
+                'p1_win_pct_20':              p1['win_pct_20'],
+                'p2_win_pct_20':              p2['win_pct_20'],
+                'p1_tourney_matches_before':  p1['tourney_matches_before'],
+                'p2_tourney_matches_before':  p2['tourney_matches_before'],
+                'p1_tourney_mins_before':     p1['tourney_mins_before'],
+                'p2_tourney_mins_before':     p2['tourney_mins_before'],
+                'p1_h2h_win_pct':             p1['h2h_win_pct'],
+                'p2_h2h_win_pct':             p2['h2h_win_pct'],
+                'p1_opp_avg_rank_beaten':     p1['opp_avg_rank_beaten'],
+                'p2_opp_avg_rank_beaten':     p2['opp_avg_rank_beaten'],
+                'surface':                    surface_enc,
+            }
 
-            try:
-                input_df = pd.DataFrame([input_row], columns=feature_cols)
-            except Exception:
-                # Fallback if feature columns mismatch
-                st.error("Feature mismatch — please re-run the app to regenerate the model.")
+            # Align to exact feature_cols order the model was trained on
+            missing = [c for c in feature_cols if c not in input_dict]
+            extra   = [c for c in input_dict   if c not in feature_cols]
+
+            if missing:
+                st.error(f"Model expects features not in input: {missing}. Clear Streamlit cache and reload.")
                 st.stop()
+
+            # Build DataFrame in exact training column order
+            input_df = pd.DataFrame([[input_dict[c] for c in feature_cols]], columns=feature_cols)
 
             probs = model.predict_proba(input_df)[0]
             prob_p1 = probs[1]
