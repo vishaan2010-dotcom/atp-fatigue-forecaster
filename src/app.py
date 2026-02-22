@@ -210,10 +210,11 @@ footer { visibility: hidden; }
 # DATA LOADING
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=86400, show_spinner=False)
-def load_raw_data(years: int = 5) -> pd.DataFrame:
+def load_raw_data(years: int = 8) -> pd.DataFrame:
     """
     Load multiple years of ATP match data from JeffSackmann/tennis_atp.
-    Fetches up to `years` years of data for robust rolling feature computation.
+    Fetches 8 years by default — critical for accurate H2H records.
+    (Sinner vs Alcaraz have meetings going back to 2021; more history = more accurate H2H)
     """
     current_year = datetime.datetime.now().year
     frames = []
@@ -482,44 +483,69 @@ def train_model(_df: pd.DataFrame):
 def build_player_stats(_df_raw: pd.DataFrame) -> dict:
     """
     Build a dict of recent stats per player name for the player lookup feature.
-    Includes surface-weighted load, h2h lookup table, and opponent quality metrics.
+    H2H uses the FULL dataset (all years loaded).
+    Rolling load stats use a 28-day window from the dataset cutoff.
     """
     df = _df_raw.copy()
     df['match_date'] = pd.to_datetime(df['tourney_date'], format='%Y%m%d', errors='coerce')
-    df = df.dropna(subset=['match_date', 'minutes', 'winner_name', 'loser_name',
-                            'winner_rank', 'loser_rank']).sort_values('match_date')
 
+    # Drop rows missing critical fields — but keep ALL years for H2H accuracy
+    df = df.dropna(subset=['match_date', 'winner_name', 'loser_name']).sort_values('match_date')
+
+    # Surface and round weights for load calculation
     df['surface_weight'] = df['surface'].map(SURFACE_FATIGUE_WEIGHT).fillna(1.0)
     df['round_weight']   = df['round'].map(ROUND_FATIGUE_WEIGHT).fillna(0.85)
-    df['weighted_mins']  = df['minutes'] * df['surface_weight'] * df['round_weight']
+
+    # Some rows may have NaN minutes — fill with surface-based median for load calc only
+    median_mins = df['minutes'].median() if df['minutes'].notna().any() else 90.0
+    df['minutes_filled']  = df['minutes'].fillna(median_mins)
+    df['weighted_mins']   = df['minutes_filled'] * df['surface_weight'] * df['round_weight']
 
     cutoff = df['match_date'].max()
-    stats  = {}
 
-    # Build H2H lookup: {(name1, name2): [1/0, ...]}
+    # ── Build H2H table from FULL history (all years) ──
+    # Key: (winner_name, loser_name) → count of times winner beat loser
     from collections import defaultdict
-    h2h = defaultdict(list)
+    h2h_wins = defaultdict(int)   # (p1, p2) → wins by p1 over p2
+    h2h_total = defaultdict(int)  # (p1, p2) → total meetings between p1 and p2
+
     for _, row in df.iterrows():
-        h2h[(row['winner_name'], row['loser_name'])].append(1)
-        h2h[(row['loser_name'],  row['winner_name'])].append(0)
+        w = row['winner_name']
+        l = row['loser_name']
+        h2h_wins[(w, l)]  += 1
+        h2h_total[(w, l)] += 1
+        h2h_total[(l, w)] += 1  # same match counted for both directions
+
+    # Convert to win% lookup: h2h_pct[(p1,p2)] = p1's win% vs p2
+    h2h_pct = {}
+    for (p1, p2), total in h2h_total.items():
+        if total > 0:
+            wins = h2h_wins.get((p1, p2), 0)
+            h2h_pct[(p1, p2)] = wins / total
+
+    # ── Build per-player stats ──
+    # Only consider players with valid rank data for lookup
+    df_ranked = df.dropna(subset=['winner_rank', 'loser_rank', 'minutes'])
 
     all_players = pd.concat([
-        df[['winner_name', 'winner_id', 'winner_rank']].rename(
+        df_ranked[['winner_name', 'winner_id', 'winner_rank']].rename(
             columns={'winner_name': 'name', 'winner_id': 'id', 'winner_rank': 'rank'}),
-        df[['loser_name', 'loser_id', 'loser_rank']].rename(
+        df_ranked[['loser_name', 'loser_id', 'loser_rank']].rename(
             columns={'loser_name': 'name', 'loser_id': 'id', 'loser_rank': 'rank'})
-    ]).drop_duplicates('name')
+    ]).sort_values('rank').drop_duplicates('name')  # keep most recent (lowest) rank per player
+
+    stats = {}
 
     for _, prow in all_players.iterrows():
         name = prow['name']
         pid  = prow['id']
 
-        w_mask = df['winner_id'] == pid
-        l_mask = df['loser_id']   == pid
+        w_mask = df_ranked['winner_id'] == pid
+        l_mask = df_ranked['loser_id']  == pid
 
-        w_df = df[w_mask][['match_date', 'minutes', 'weighted_mins', 'surface', 'loser_rank']].assign(won=1)
+        w_df = df_ranked[w_mask][['match_date', 'minutes', 'weighted_mins', 'loser_rank']].assign(won=1)
         w_df = w_df.rename(columns={'loser_rank': 'opp_rank'})
-        l_df = df[l_mask][['match_date', 'minutes', 'weighted_mins', 'surface', 'winner_rank']].assign(won=0)
+        l_df = df_ranked[l_mask][['match_date', 'minutes', 'weighted_mins', 'winner_rank']].assign(won=0)
         l_df = l_df.rename(columns={'winner_rank': 'opp_rank'})
 
         ph = pd.concat([w_df, l_df]).sort_values('match_date')
@@ -527,7 +553,7 @@ def build_player_stats(_df_raw: pd.DataFrame) -> dict:
             continue
 
         last_date  = ph['match_date'].iloc[-1]
-        days_since = (cutoff - last_date).days
+        days_since = max(0, (cutoff - last_date).days)
 
         d7  = cutoff - pd.Timedelta(days=7)
         d14 = cutoff - pd.Timedelta(days=14)
@@ -538,8 +564,8 @@ def build_player_stats(_df_raw: pd.DataFrame) -> dict:
         r28 = ph[ph['match_date'] >= d28]
 
         # Opponent quality — avg rank of players beaten in last 10 wins
-        recent_wins     = ph[ph['won'] == 1].tail(10)
-        opp_avg_rank    = float(recent_wins['opp_rank'].mean()) if len(recent_wins) > 0 else 100.0
+        recent_wins  = ph[ph['won'] == 1].tail(10)
+        opp_avg_rank = float(recent_wins['opp_rank'].mean()) if len(recent_wins) > 0 else 100.0
 
         stats[name] = {
             'rank':                    int(prow['rank']) if not pd.isna(prow['rank']) else 100,
@@ -548,19 +574,20 @@ def build_player_stats(_df_raw: pd.DataFrame) -> dict:
             'cum_mins_28d':            float(r28['minutes'].sum()),
             'surf_weighted_mins_28d':  float(r28['weighted_mins'].sum()),
             'round_weighted_mins_28d': float(r28['weighted_mins'].sum()),
-            'matches_7d':              len(r7),
-            'days_since_last':         days_since,
+            'matches_7d':              int(len(r7)),
+            'days_since_last':         int(days_since),
             'win_pct_10':              float(ph.tail(10)['won'].mean()),
             'win_pct_20':              float(ph.tail(20)['won'].mean()),
             'tourney_matches_before':  0,
             'tourney_mins_before':     0,
-            'h2h_win_pct':             0.5,   # filled dynamically at matchup time
+            'h2h_win_pct':             0.5,   # resolved dynamically per matchup
             'opp_avg_rank_beaten':     opp_avg_rank,
-            '_h2h_key':                name,  # for dynamic H2H lookup
         }
 
-    # Attach H2H table to allow dynamic lookup in the UI
-    stats['__h2h__'] = dict(h2h)
+    # Store H2H table separately — keyed by name pair
+    stats['__h2h_pct__']   = dict(h2h_pct)    # (p1,p2) → win%
+    stats['__h2h_wins__']  = dict(h2h_wins)   # (p1,p2) → raw win count
+    stats['__h2h_total__'] = dict(h2h_total)  # (p1,p2) → total meetings
     return stats
 
 
@@ -778,8 +805,8 @@ def main():
     """, unsafe_allow_html=True)
 
     # Load data
-    with st.spinner("Loading ATP match history..."):
-        df_raw = load_raw_data(years=4)
+    with st.spinner("Loading ATP match history (8 years for accurate H2H)..."):
+        df_raw = load_raw_data(years=8)
 
     if df_raw.empty:
         st.error("Could not reach the upstream data repository. Check your internet connection.")
@@ -798,7 +825,8 @@ def main():
     with st.spinner("Building player stats index..."):
         player_stats = build_player_stats(df_raw)
 
-    player_names = sorted([k for k in player_stats.keys() if k != '__h2h__'])
+    INTERNAL_KEYS = {'__h2h_pct__', '__h2h_wins__', '__h2h_total__'}
+    player_names = sorted([k for k in player_stats.keys() if k not in INTERNAL_KEYS])
 
     # Data freshness indicator
     df_raw['match_date'] = pd.to_datetime(df_raw['tourney_date'], format='%Y%m%d', errors='coerce')
@@ -840,23 +868,42 @@ def main():
         p1 = dict(player_stats[name1])
         p2 = dict(player_stats[name2])
 
-        # Resolve H2H dynamically now that we know both players
-        h2h_table = player_stats.get('__h2h__', {})
-        h2h_p1 = h2h_table.get((name1, name2), [])
-        h2h_p2 = h2h_table.get((name2, name1), [])
-        p1['h2h_win_pct'] = float(np.mean(h2h_p1)) if len(h2h_p1) >= 2 else 0.5
-        p2['h2h_win_pct'] = float(np.mean(h2h_p2)) if len(h2h_p2) >= 2 else 0.5
+        # Resolve H2H from clean lookup tables
+        h2h_pct_table   = player_stats.get('__h2h_pct__',   {})
+        h2h_wins_table  = player_stats.get('__h2h_wins__',  {})
+        h2h_total_table = player_stats.get('__h2h_total__', {})
+
+        p1_wins_h2h  = h2h_wins_table.get((name1, name2), 0)
+        p2_wins_h2h  = h2h_wins_table.get((name2, name1), 0)
+        total_h2h    = h2h_total_table.get((name1, name2), 0)
+
+        p1['h2h_win_pct'] = h2h_pct_table.get((name1, name2), 0.5)
+        p2['h2h_win_pct'] = h2h_pct_table.get((name2, name1), 0.5)
 
         # H2H record display
-        total_h2h = len(h2h_p1)
         if total_h2h > 0:
+            leader     = name1 if p1_wins_h2h >= p2_wins_h2h else name2
+            lead_color = '#4A7FC4' if p1_wins_h2h >= p2_wins_h2h else '#C4622D'
             st.sidebar.markdown(f"""
             <div style="background:#1C1C1C; border:1px solid #2E2E2E; border-radius:6px;
                         padding:10px 14px; font-family:'DM Mono',monospace; font-size:11px; color:#9A9A9A; margin-top:8px;">
-                H2H: <span style="color:#4A7FC4;">{name1.split()[-1]} {sum(h2h_p1)}</span>
-                &nbsp;–&nbsp;
-                <span style="color:#C4622D;">{sum(h2h_p2)} {name2.split()[-1]}</span>
-                &nbsp;({total_h2h} meetings)
+                <div style="font-size:9px; letter-spacing:2px; text-transform:uppercase; margin-bottom:6px; color:#5A5A5A;">
+                    All-Time H2H ({total_h2h} meetings)
+                </div>
+                <span style="color:#4A7FC4; font-size:13px;">{p1_wins_h2h}</span>
+                <span style="color:#5A5A5A;"> – </span>
+                <span style="color:#C4622D; font-size:13px;">{p2_wins_h2h}</span>
+                &nbsp;&nbsp;
+                <span style="color:{lead_color}; font-size:10px;">
+                    {leader.split()[-1]} leads
+                </span>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.sidebar.markdown(f"""
+            <div style="background:#1C1C1C; border:1px solid #2E2E2E; border-radius:6px;
+                        padding:8px 14px; font-family:'DM Mono',monospace; font-size:11px; color:#5A5A5A; margin-top:8px;">
+                No H2H meetings found in dataset
             </div>
             """, unsafe_allow_html=True)
 
@@ -864,30 +911,42 @@ def main():
         name1 = st.sidebar.text_input("Player 1 Name", "Player 1")
         name2 = st.sidebar.text_input("Player 2 Name", "Player 2")
         st.sidebar.markdown("**Player 1**")
+        p1_rank   = st.sidebar.number_input("P1 Rank", 1, 500, 10)
+        p1_m28    = st.sidebar.slider("P1 Load — 28d (mins)", 0, 1400, 400)
         p1 = {
-            'rank':                    st.sidebar.number_input("P1 Rank", 1, 500, 10),
-            'cum_mins_7d':             st.sidebar.slider("P1 Load — 7d (mins)", 0, 600, 120),
-            'cum_mins_14d':            st.sidebar.slider("P1 Load — 14d (mins)", 0, 900, 240),
-            'cum_mins_28d':            st.sidebar.slider("P1 Load — 28d (mins)", 0, 1400, 400),
+            'rank':                    p1_rank,
+            'cum_mins_7d':             st.sidebar.slider("P1 Load — 7d (mins)",  0, 600,  120),
+            'cum_mins_14d':            st.sidebar.slider("P1 Load — 14d (mins)", 0, 900,  240),
+            'cum_mins_28d':            p1_m28,
+            'surf_weighted_mins_28d':  p1_m28 * SURFACE_FATIGUE_WEIGHT.get(surface_name, 1.0),
+            'round_weighted_mins_28d': p1_m28 * SURFACE_FATIGUE_WEIGHT.get(surface_name, 1.0),
             'matches_7d':              st.sidebar.slider("P1 Matches (7d)", 0, 10, 3),
             'days_since_last':         st.sidebar.slider("P1 Rest Days", 0, 30, 3),
             'win_pct_10':              st.sidebar.slider("P1 Win% (last 10)", 0.0, 1.0, 0.7),
             'win_pct_20':              st.sidebar.slider("P1 Win% (last 20)", 0.0, 1.0, 0.65),
-            'tourney_matches_before':  st.sidebar.slider("P1 Tourney Matches Played", 0, 6, 0),
-            'tourney_mins_before':     st.sidebar.slider("P1 Tourney Mins Played", 0, 900, 0),
+            'tourney_matches_before':  st.sidebar.slider("P1 Tourney Matches", 0, 6, 0),
+            'tourney_mins_before':     st.sidebar.slider("P1 Tourney Mins",    0, 900, 0),
+            'h2h_win_pct':             st.sidebar.slider("P1 H2H Win %", 0.0, 1.0, 0.5),
+            'opp_avg_rank_beaten':     st.sidebar.number_input("P1 Avg Opp Rank Beaten", 1, 500, 40),
         }
         st.sidebar.markdown("**Player 2**")
+        p2_rank   = st.sidebar.number_input("P2 Rank", 1, 500, 20)
+        p2_m28    = st.sidebar.slider("P2 Load — 28d (mins)", 0, 1400, 700)
         p2 = {
-            'rank':                    st.sidebar.number_input("P2 Rank", 1, 500, 20),
-            'cum_mins_7d':             st.sidebar.slider("P2 Load — 7d (mins)", 0, 600, 280),
-            'cum_mins_14d':            st.sidebar.slider("P2 Load — 14d (mins)", 0, 900, 450),
-            'cum_mins_28d':            st.sidebar.slider("P2 Load — 28d (mins)", 0, 1400, 700),
+            'rank':                    p2_rank,
+            'cum_mins_7d':             st.sidebar.slider("P2 Load — 7d (mins)",  0, 600,  280),
+            'cum_mins_14d':            st.sidebar.slider("P2 Load — 14d (mins)", 0, 900,  450),
+            'cum_mins_28d':            p2_m28,
+            'surf_weighted_mins_28d':  p2_m28 * SURFACE_FATIGUE_WEIGHT.get(surface_name, 1.0),
+            'round_weighted_mins_28d': p2_m28 * SURFACE_FATIGUE_WEIGHT.get(surface_name, 1.0),
             'matches_7d':              st.sidebar.slider("P2 Matches (7d)", 0, 10, 6),
             'days_since_last':         st.sidebar.slider("P2 Rest Days", 0, 30, 1),
             'win_pct_10':              st.sidebar.slider("P2 Win% (last 10)", 0.0, 1.0, 0.5),
             'win_pct_20':              st.sidebar.slider("P2 Win% (last 20)", 0.0, 1.0, 0.5),
-            'tourney_matches_before':  st.sidebar.slider("P2 Tourney Matches Played", 0, 6, 3),
-            'tourney_mins_before':     st.sidebar.slider("P2 Tourney Mins Played", 0, 900, 380),
+            'tourney_matches_before':  st.sidebar.slider("P2 Tourney Matches", 0, 6, 3),
+            'tourney_mins_before':     st.sidebar.slider("P2 Tourney Mins",    0, 900, 380),
+            'h2h_win_pct':             st.sidebar.slider("P2 H2H Win %", 0.0, 1.0, 0.5),
+            'opp_avg_rank_beaten':     st.sidebar.number_input("P2 Avg Opp Rank Beaten", 1, 500, 60),
         }
 
     run = st.sidebar.button("Run Inference", type="primary", use_container_width=True)
