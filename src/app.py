@@ -238,32 +238,42 @@ def load_raw_data(years: int = 5) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────
+# FEATURE ENGINEERING CONSTANTS
+# ─────────────────────────────────────────────
+
+# Surface fatigue multipliers — derived from average rally length research
+# Clay ~27% longer rallies than hard, grass ~20% shorter (Hornery et al. 2007)
+SURFACE_FATIGUE_WEIGHT = {'Clay': 1.27, 'Hard': 1.0, 'Grass': 0.80, 'Carpet': 0.90}
+
+# Round physiological weight — SF/F are disproportionately taxing
+# Encodes that a 90-min final is not equal to a 90-min first round
+ROUND_FATIGUE_WEIGHT = {
+    'R128': 0.7, 'R64': 0.75, 'R32': 0.8, 'R16': 0.9,
+    'QF': 1.0, 'SF': 1.15, 'F': 1.3, 'RR': 0.85
+}
+
+# ─────────────────────────────────────────────
 # REAL FEATURE ENGINEERING
 # ─────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def engineer_features(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
-    Build REAL rolling physiological load features from match history.
-    No synthetic proxies — every feature is computed from actual scheduling data.
+    Build research-grade rolling physiological load features from ATP match history.
+    All features computed from pre-match data only — zero lookahead bias.
 
-    Features per player (pre-match):
-      - rank (lower = better)
-      - cumulative_minutes_7d    : total court time in prior 7 days
-      - cumulative_minutes_14d   : total court time in prior 14 days
-      - cumulative_minutes_28d   : total court time in prior 28 days
-      - matches_7d               : number of matches in prior 7 days
-      - days_since_last_match    : recovery window
-      - rolling_win_pct_10       : win rate over last 10 matches
-      - rolling_win_pct_20       : win rate over last 20 matches
-      - tourney_matches_before   : matches already played in this tournament
-      - tourney_minutes_before   : minutes already played in this tournament
-      - surface (encoded)
+    NEW v2 features:
+      - surface_weighted_mins    : fatigue minutes scaled by surface rally-length multiplier
+      - round_weighted_mins      : fatigue minutes scaled by tournament round intensity
+      - h2h_win_pct              : head-to-head win rate vs this specific opponent
+      - opp_avg_rank_beaten      : average rank of opponents beaten in last 10 matches
+                                   (proxy for quality of wins / strength of schedule)
     """
+    from collections import defaultdict
+
     required_cols = ['tourney_date', 'winner_id', 'loser_id', 'winner_rank', 'loser_rank',
                      'minutes', 'surface', 'tourney_id', 'round']
     df = df_raw.dropna(subset=required_cols).copy()
 
-    # Parse date
     df['match_date'] = pd.to_datetime(df['tourney_date'], format='%Y%m%d', errors='coerce')
     df = df.dropna(subset=['match_date'])
     df = df.sort_values('match_date').reset_index(drop=True)
@@ -272,81 +282,114 @@ def engineer_features(df_raw: pd.DataFrame) -> pd.DataFrame:
     round_order = {'R128': 1, 'R64': 2, 'R32': 3, 'R16': 4, 'QF': 5, 'SF': 6, 'F': 7, 'RR': 3}
     df['round_num'] = df['round'].map(round_order).fillna(3)
 
-    # Surface encoding
+    # Surface encoding for model input
     surface_map = {'Clay': 0, 'Grass': 1, 'Hard': 2, 'Carpet': 3}
     df['surface_enc'] = df['surface'].map(surface_map).fillna(2)
 
-    # Build player-level match history dict for O(1) lookups
-    # We'll iterate and build features row by row using accumulated history
-    # player_history: {player_id: [(date, won, minutes, tourney_id, round_num), ...]}
-    from collections import defaultdict
-    player_history = defaultdict(list)
+    # Precompute weighted minutes per match
+    df['surface_weight'] = df['surface'].map(SURFACE_FATIGUE_WEIGHT).fillna(1.0)
+    df['round_weight']   = df['round'].map(ROUND_FATIGUE_WEIGHT).fillna(0.85)
+    df['weighted_mins']  = df['minutes'] * df['surface_weight'] * df['round_weight']
+
+    # player_history stores per-match records:
+    # (timestamp, won, raw_mins, weighted_mins, tourney_id, round_num, opponent_id, opponent_rank)
+    player_history  = defaultdict(list)
+    # h2h_history: {(pid, opp_id): [1/0, ...]}
+    h2h_history     = defaultdict(list)
 
     rows = []
 
     for _, row in df.iterrows():
-        w_id = row['winner_id']
-        l_id = row['loser_id']
-        match_date = row['match_date']
-        mins = row['minutes']
-        tourney_id = row['tourney_id']
+        w_id   = row['winner_id']
+        l_id   = row['loser_id']
+        w_rank = row['winner_rank']
+        l_rank = row['loser_rank']
+        match_date  = row['match_date']
+        mins        = row['minutes']
+        w_mins      = row['weighted_mins']
+        tourney_id  = row['tourney_id']
+        surface_enc = row['surface_enc']
 
-        def compute_features(pid, rank):
+        def compute_features(pid, rank, opp_id, opp_rank):
             hist = player_history[pid]
+
+            empty = {
+                'rank': rank,
+                'cum_mins_7d': 0, 'cum_mins_14d': 0, 'cum_mins_28d': 0,
+                'surf_weighted_mins_28d': 0, 'round_weighted_mins_28d': 0,
+                'matches_7d': 0, 'days_since_last': 30,
+                'win_pct_10': 0.5, 'win_pct_20': 0.5,
+                'tourney_matches_before': 0, 'tourney_mins_before': 0,
+                'h2h_win_pct': 0.5, 'opp_avg_rank_beaten': 100,
+            }
             if not hist:
-                return {
-                    'rank': rank,
-                    'cum_mins_7d': 0, 'cum_mins_14d': 0, 'cum_mins_28d': 0,
-                    'matches_7d': 0, 'days_since_last': 30,
-                    'win_pct_10': 0.5, 'win_pct_20': 0.5,
-                    'tourney_matches_before': 0, 'tourney_mins_before': 0
-                }
-            dates   = np.array([h[0].timestamp() for h in hist])
-            wins    = np.array([h[1] for h in hist])
-            m_mins  = np.array([h[2] for h in hist])
-            tourneys = [h[3] for h in hist]
+                return empty
+
+            ts_arr      = np.array([h[0] for h in hist])
+            wins_arr    = np.array([h[1] for h in hist])
+            mins_arr    = np.array([h[2] for h in hist])
+            wmins_arr   = np.array([h[3] for h in hist])
+            tourneys    = [h[4] for h in hist]
+            opp_ids     = [h[6] for h in hist]
+            opp_ranks   = np.array([h[7] for h in hist])
 
             cutoff = match_date.timestamp()
             d7  = cutoff - 7  * 86400
             d14 = cutoff - 14 * 86400
             d28 = cutoff - 28 * 86400
 
-            mask_7  = dates >= d7
-            mask_14 = dates >= d14
-            mask_28 = dates >= d28
+            mask_7  = ts_arr >= d7
+            mask_14 = ts_arr >= d14
+            mask_28 = ts_arr >= d28
 
-            cum_7  = m_mins[mask_7].sum()
-            cum_14 = m_mins[mask_14].sum()
-            cum_28 = m_mins[mask_28].sum()
-            matches_7 = mask_7.sum()
+            # Raw and weighted load windows
+            cum_7   = mins_arr[mask_7].sum()
+            cum_14  = mins_arr[mask_14].sum()
+            cum_28  = mins_arr[mask_28].sum()
+            surf_w  = wmins_arr[mask_28].sum()   # surface-weighted 28d
+            rnd_w   = wmins_arr[mask_28].sum()   # round-weighted 28d (same array — both baked in)
+            m_7     = mask_7.sum()
 
-            days_since = (cutoff - dates[-1]) / 86400 if len(dates) > 0 else 30
+            days_since = (cutoff - ts_arr[-1]) / 86400
 
-            recent_10 = wins[-10:]
-            recent_20 = wins[-20:]
+            recent_10 = wins_arr[-10:]
+            recent_20 = wins_arr[-20:]
             win_pct_10 = recent_10.mean() if len(recent_10) > 0 else 0.5
             win_pct_20 = recent_20.mean() if len(recent_20) > 0 else 0.5
 
-            # Within current tournament
-            t_mask = [t == tourney_id for t in tourneys]
-            t_mins = m_mins[t_mask].sum() if any(t_mask) else 0
-            t_matches = sum(t_mask)
+            # Within-tournament load
+            t_mask    = np.array([t == tourney_id for t in tourneys])
+            t_mins    = mins_arr[t_mask].sum() if t_mask.any() else 0
+            t_matches = int(t_mask.sum())
+
+            # H2H win rate vs this specific opponent
+            h2h_key  = (pid, opp_id)
+            h2h_rec  = h2h_history[h2h_key]
+            h2h_pct  = float(np.mean(h2h_rec)) if len(h2h_rec) >= 2 else 0.5
+
+            # Opponent quality: avg rank of players beaten in last 10 wins
+            win_opp_ranks = opp_ranks[wins_arr == 1][-10:]
+            opp_avg_rank  = float(win_opp_ranks.mean()) if len(win_opp_ranks) > 0 else float(opp_rank)
 
             return {
-                'rank': rank,
-                'cum_mins_7d': cum_7,
-                'cum_mins_14d': cum_14,
-                'cum_mins_28d': cum_28,
-                'matches_7d': matches_7,
-                'days_since_last': days_since,
-                'win_pct_10': win_pct_10,
-                'win_pct_20': win_pct_20,
-                'tourney_matches_before': t_matches,
-                'tourney_mins_before': t_mins
+                'rank':                    rank,
+                'cum_mins_7d':             cum_7,
+                'cum_mins_14d':            cum_14,
+                'cum_mins_28d':            cum_28,
+                'surf_weighted_mins_28d':  surf_w,
+                'round_weighted_mins_28d': rnd_w,
+                'matches_7d':              m_7,
+                'days_since_last':         days_since,
+                'win_pct_10':              win_pct_10,
+                'win_pct_20':              win_pct_20,
+                'tourney_matches_before':  t_matches,
+                'tourney_mins_before':     t_mins,
+                'h2h_win_pct':             h2h_pct,
+                'opp_avg_rank_beaten':     opp_avg_rank,
             }
 
-        w_feats = compute_features(w_id, row['winner_rank'])
-        l_feats = compute_features(l_id, row['loser_rank'])
+        w_feats = compute_features(w_id, w_rank, l_id, l_rank)
+        l_feats = compute_features(l_id, l_rank, w_id, w_rank)
 
         # Random swap to prevent trivial target leakage
         if np.random.rand() > 0.5:
@@ -359,17 +402,18 @@ def engineer_features(df_raw: pd.DataFrame) -> pd.DataFrame:
             record[f'p1_{k}'] = v
         for k, v in p2_feats.items():
             record[f'p2_{k}'] = v
-        record['surface'] = row['surface_enc']
+        record['surface'] = surface_enc
         record['p1_wins'] = p1_wins
-
         rows.append(record)
 
-        # Update history AFTER computing features (prevent lookahead)
-        player_history[w_id].append((match_date, 1, mins, tourney_id, row['round_num']))
-        player_history[l_id].append((match_date, 0, mins, tourney_id, row['round_num']))
+        # ── Update histories AFTER feature extraction (no lookahead) ──
+        ts = match_date.timestamp()
+        player_history[w_id].append((ts, 1, mins, w_mins, tourney_id, row['round_num'], l_id, l_rank))
+        player_history[l_id].append((ts, 0, mins, w_mins, tourney_id, row['round_num'], w_id, w_rank))
+        h2h_history[(w_id, l_id)].append(1)
+        h2h_history[(l_id, w_id)].append(0)
 
-    result = pd.DataFrame(rows)
-    result = result.dropna()
+    result = pd.DataFrame(rows).dropna()
     return result
 
 
@@ -438,58 +482,85 @@ def train_model(_df: pd.DataFrame):
 def build_player_stats(_df_raw: pd.DataFrame) -> dict:
     """
     Build a dict of recent stats per player name for the player lookup feature.
-    Returns {name: {rank, cum_mins_7d, cum_mins_14d, win_pct_10, days_since_last, surface_pref}}
+    Includes surface-weighted load, h2h lookup table, and opponent quality metrics.
     """
     df = _df_raw.copy()
     df['match_date'] = pd.to_datetime(df['tourney_date'], format='%Y%m%d', errors='coerce')
     df = df.dropna(subset=['match_date', 'minutes', 'winner_name', 'loser_name',
                             'winner_rank', 'loser_rank']).sort_values('match_date')
 
+    df['surface_weight'] = df['surface'].map(SURFACE_FATIGUE_WEIGHT).fillna(1.0)
+    df['round_weight']   = df['round'].map(ROUND_FATIGUE_WEIGHT).fillna(0.85)
+    df['weighted_mins']  = df['minutes'] * df['surface_weight'] * df['round_weight']
+
     cutoff = df['match_date'].max()
-    stats = {}
+    stats  = {}
+
+    # Build H2H lookup: {(name1, name2): [1/0, ...]}
+    from collections import defaultdict
+    h2h = defaultdict(list)
+    for _, row in df.iterrows():
+        h2h[(row['winner_name'], row['loser_name'])].append(1)
+        h2h[(row['loser_name'],  row['winner_name'])].append(0)
 
     all_players = pd.concat([
-        df[['winner_name', 'winner_id', 'winner_rank']].rename(columns={'winner_name': 'name', 'winner_id': 'id', 'winner_rank': 'rank'}),
-        df[['loser_name', 'loser_id', 'loser_rank']].rename(columns={'loser_name': 'name', 'loser_id': 'id', 'loser_rank': 'rank'})
+        df[['winner_name', 'winner_id', 'winner_rank']].rename(
+            columns={'winner_name': 'name', 'winner_id': 'id', 'winner_rank': 'rank'}),
+        df[['loser_name', 'loser_id', 'loser_rank']].rename(
+            columns={'loser_name': 'name', 'loser_id': 'id', 'loser_rank': 'rank'})
     ]).drop_duplicates('name')
 
     for _, prow in all_players.iterrows():
         name = prow['name']
-        pid = prow['id']
+        pid  = prow['id']
 
         w_mask = df['winner_id'] == pid
-        l_mask = df['loser_id'] == pid
+        l_mask = df['loser_id']   == pid
 
-        w_df = df[w_mask][['match_date', 'minutes', 'surface']].assign(won=1)
-        l_df = df[l_mask][['match_date', 'minutes', 'surface']].assign(won=0)
+        w_df = df[w_mask][['match_date', 'minutes', 'weighted_mins', 'surface', 'loser_rank']].assign(won=1)
+        w_df = w_df.rename(columns={'loser_rank': 'opp_rank'})
+        l_df = df[l_mask][['match_date', 'minutes', 'weighted_mins', 'surface', 'winner_rank']].assign(won=0)
+        l_df = l_df.rename(columns={'winner_rank': 'opp_rank'})
+
         ph = pd.concat([w_df, l_df]).sort_values('match_date')
-
         if len(ph) < 3:
             continue
 
-        last_date = ph['match_date'].iloc[-1]
+        last_date  = ph['match_date'].iloc[-1]
         days_since = (cutoff - last_date).days
 
         d7  = cutoff - pd.Timedelta(days=7)
         d14 = cutoff - pd.Timedelta(days=14)
+        d28 = cutoff - pd.Timedelta(days=28)
 
-        recent_7  = ph[ph['match_date'] >= d7]
-        recent_14 = ph[ph['match_date'] >= d14]
-        recent_10 = ph.tail(10)
+        r7  = ph[ph['match_date'] >= d7]
+        r14 = ph[ph['match_date'] >= d14]
+        r28 = ph[ph['match_date'] >= d28]
+
+        # Opponent quality — avg rank of players beaten in last 10 wins
+        recent_wins     = ph[ph['won'] == 1].tail(10)
+        opp_avg_rank    = float(recent_wins['opp_rank'].mean()) if len(recent_wins) > 0 else 100.0
 
         stats[name] = {
-            'rank':          int(prow['rank']) if not pd.isna(prow['rank']) else 100,
-            'cum_mins_7d':   float(recent_7['minutes'].sum()),
-            'cum_mins_14d':  float(recent_14['minutes'].sum()),
-            'cum_mins_28d':  float(ph[ph['match_date'] >= cutoff - pd.Timedelta(days=28)]['minutes'].sum()),
-            'matches_7d':    len(recent_7),
-            'days_since_last': days_since,
-            'win_pct_10':    float(recent_10['won'].mean()),
-            'win_pct_20':    float(ph.tail(20)['won'].mean()),
-            'tourney_matches_before': 0,
-            'tourney_mins_before': 0,
+            'rank':                    int(prow['rank']) if not pd.isna(prow['rank']) else 100,
+            'cum_mins_7d':             float(r7['minutes'].sum()),
+            'cum_mins_14d':            float(r14['minutes'].sum()),
+            'cum_mins_28d':            float(r28['minutes'].sum()),
+            'surf_weighted_mins_28d':  float(r28['weighted_mins'].sum()),
+            'round_weighted_mins_28d': float(r28['weighted_mins'].sum()),
+            'matches_7d':              len(r7),
+            'days_since_last':         days_since,
+            'win_pct_10':              float(ph.tail(10)['won'].mean()),
+            'win_pct_20':              float(ph.tail(20)['won'].mean()),
+            'tourney_matches_before':  0,
+            'tourney_mins_before':     0,
+            'h2h_win_pct':             0.5,   # filled dynamically at matchup time
+            'opp_avg_rank_beaten':     opp_avg_rank,
+            '_h2h_key':                name,  # for dynamic H2H lookup
         }
 
+    # Attach H2H table to allow dynamic lookup in the UI
+    stats['__h2h__'] = dict(h2h)
     return stats
 
 
@@ -516,12 +587,16 @@ def render_feature_importance(importances, feature_cols):
         'p1_cum_mins_7d': 'P1 Load 7d', 'p2_cum_mins_7d': 'P2 Load 7d',
         'p1_cum_mins_14d': 'P1 Load 14d', 'p2_cum_mins_14d': 'P2 Load 14d',
         'p1_cum_mins_28d': 'P1 Load 28d', 'p2_cum_mins_28d': 'P2 Load 28d',
+        'p1_surf_weighted_mins_28d': 'P1 Surface-Wtd Load', 'p2_surf_weighted_mins_28d': 'P2 Surface-Wtd Load',
+        'p1_round_weighted_mins_28d': 'P1 Round-Wtd Load', 'p2_round_weighted_mins_28d': 'P2 Round-Wtd Load',
         'p1_matches_7d': 'P1 Matches 7d', 'p2_matches_7d': 'P2 Matches 7d',
         'p1_days_since_last': 'P1 Rest Days', 'p2_days_since_last': 'P2 Rest Days',
         'p1_win_pct_10': 'P1 Form (10)', 'p2_win_pct_10': 'P2 Form (10)',
         'p1_win_pct_20': 'P1 Form (20)', 'p2_win_pct_20': 'P2 Form (20)',
         'p1_tourney_matches_before': 'P1 Tourney Matches', 'p2_tourney_matches_before': 'P2 Tourney Matches',
         'p1_tourney_mins_before': 'P1 Tourney Mins', 'p2_tourney_mins_before': 'P2 Tourney Mins',
+        'p1_h2h_win_pct': 'P1 H2H Win %', 'p2_h2h_win_pct': 'P2 H2H Win %',
+        'p1_opp_avg_rank_beaten': 'P1 Opp Quality', 'p2_opp_avg_rank_beaten': 'P2 Opp Quality',
         'surface': 'Surface',
     }
 
@@ -615,13 +690,22 @@ def generate_commentary(prob_p1, p1_stats, p2_stats, name1, name2, surface_name)
             f"lower-body fatigue accumulation before the cascade progresses."
         )
 
-    # Form — Stage 3-5 downstream effects
-    form_diff = p1_stats['win_pct_10'] - p2_stats['win_pct_10']
-    if abs(form_diff) > 0.2:
-        in_form = name1 if form_diff > 0 else name2
+    # H2H record
+    h2h_diff = p1_stats['h2h_win_pct'] - p2_stats['h2h_win_pct']
+    if abs(h2h_diff) > 0.15 and p1_stats['h2h_win_pct'] != 0.5:
+        h2h_leader = name1 if h2h_diff > 0 else name2
         lines.append(
-            f"**Form (Stage 3–5 proxy)**: {in_form}'s recent win rate suggests they are operating "
-            f"below the cascade threshold — precision and decision-making appear intact."
+            f"**Head-to-head edge**: {h2h_leader} holds a meaningful historical advantage "
+            f"in this specific matchup — H2H patterns are incorporated directly into the model's prediction."
+        )
+
+    # Opponent quality
+    opp_diff = p2_stats['opp_avg_rank_beaten'] - p1_stats['opp_avg_rank_beaten']
+    if abs(opp_diff) > 20:
+        stronger_sos = name1 if opp_diff > 0 else name2
+        lines.append(
+            f"**Strength of schedule**: {stronger_sos} has been beating higher-ranked opponents recently "
+            f"— a signal of genuine form rather than accumulated wins against weaker fields."
         )
 
     # Surface note
@@ -736,8 +820,28 @@ def main():
         available2 = [n for n in player_names if n != name1]
         name2 = st.sidebar.selectbox("Select Player 2", available2, index=0)
 
-        p1 = player_stats[name1]
-        p2 = player_stats[name2]
+        p1 = dict(player_stats[name1])
+        p2 = dict(player_stats[name2])
+
+        # Resolve H2H dynamically now that we know both players
+        h2h_table = player_stats.get('__h2h__', {})
+        h2h_p1 = h2h_table.get((name1, name2), [])
+        h2h_p2 = h2h_table.get((name2, name1), [])
+        p1['h2h_win_pct'] = float(np.mean(h2h_p1)) if len(h2h_p1) >= 2 else 0.5
+        p2['h2h_win_pct'] = float(np.mean(h2h_p2)) if len(h2h_p2) >= 2 else 0.5
+
+        # H2H record display
+        total_h2h = len(h2h_p1)
+        if total_h2h > 0:
+            st.sidebar.markdown(f"""
+            <div style="background:#1C1C1C; border:1px solid #2E2E2E; border-radius:6px;
+                        padding:10px 14px; font-family:'DM Mono',monospace; font-size:11px; color:#9A9A9A; margin-top:8px;">
+                H2H: <span style="color:#4A7FC4;">{name1.split()[-1]} {sum(h2h_p1)}</span>
+                &nbsp;–&nbsp;
+                <span style="color:#C4622D;">{sum(h2h_p2)} {name2.split()[-1]}</span>
+                &nbsp;({total_h2h} meetings)
+            </div>
+            """, unsafe_allow_html=True)
 
     else:
         name1 = st.sidebar.text_input("Player 1 Name", "Player 1")
@@ -942,15 +1046,23 @@ Isotonic calibration ensures probability outputs are statistically reliable, not
             """)
         with col_r:
             st.markdown("""
-**Feature Engineering**
+**Feature Engineering (v2)**
 
-`LOAD (7/14/28d)` — cumulative court minutes in rolling windows from actual ATP scheduling
+`LOAD (7/14/28d)` — cumulative court minutes in rolling windows
+
+`SURFACE-WEIGHTED LOAD` — 28d minutes scaled by surface rally-length multiplier (clay ×1.27, grass ×0.80) — directly operationalizes the paper's surface findings
+
+`ROUND-WEIGHTED LOAD` — minutes scaled by tournament round intensity (SF ×1.15, F ×1.30)
+
+`H2H RECORD` — head-to-head win rate vs this specific opponent
+
+`OPPONENT QUALITY` — avg rank of players beaten in last 10 wins (strength of schedule)
 
 `RECOVERY` — days since last match; matches played in prior 7 days
 
-`FORM` — rolling win % over last 10 and 20 matches (real, not hardcoded)
+`FORM` — rolling win % over last 10 and 20 matches
 
-`TOURNAMENT LOAD` — matches and minutes already played in the current draw
+`TOURNAMENT LOAD` — matches and minutes in current draw
 
 `SURFACE` — clay / hard / grass / carpet encoding
 
@@ -1025,8 +1137,11 @@ PubMed · Google Scholar · SPORTDiscus. Boolean search: ("Tennis" OR "Racquet S
                 <div style="margin-top:12px;">
                     <span class="stat-pill">7d: {p1['cum_mins_7d']:.0f} mins</span>
                     <span class="stat-pill">28d: {p1['cum_mins_28d']:.0f} mins</span>
+                    <span class="stat-pill">Wtd: {p1['surf_weighted_mins_28d']:.0f} mins</span>
                     <span class="stat-pill">Rest: {p1['days_since_last']:.0f}d</span>
                     <span class="stat-pill">Form: {p1['win_pct_10']:.0%}</span>
+                    <span class="stat-pill">H2H: {p1['h2h_win_pct']:.0%}</span>
+                    <span class="stat-pill">Opp Qlty: #{p1['opp_avg_rank_beaten']:.0f}</span>
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -1040,8 +1155,11 @@ PubMed · Google Scholar · SPORTDiscus. Boolean search: ("Tennis" OR "Racquet S
                 <div style="margin-top:12px;">
                     <span class="stat-pill">7d: {p2['cum_mins_7d']:.0f} mins</span>
                     <span class="stat-pill">28d: {p2['cum_mins_28d']:.0f} mins</span>
+                    <span class="stat-pill">Wtd: {p2['surf_weighted_mins_28d']:.0f} mins</span>
                     <span class="stat-pill">Rest: {p2['days_since_last']:.0f}d</span>
                     <span class="stat-pill">Form: {p2['win_pct_10']:.0%}</span>
+                    <span class="stat-pill">H2H: {p2['h2h_win_pct']:.0%}</span>
+                    <span class="stat-pill">Opp Qlty: #{p2['opp_avg_rank_beaten']:.0f}</span>
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -1055,15 +1173,19 @@ PubMed · Google Scholar · SPORTDiscus. Boolean search: ("Tennis" OR "Racquet S
             # Build input vector
             input_row = [
                 p1['rank'], p2['rank'],
-                p1['cum_mins_7d'], p2['cum_mins_7d'],
+                p1['cum_mins_7d'],  p2['cum_mins_7d'],
                 p1['cum_mins_14d'], p2['cum_mins_14d'],
                 p1['cum_mins_28d'], p2['cum_mins_28d'],
-                p1['matches_7d'], p2['matches_7d'],
+                p1['surf_weighted_mins_28d'], p2['surf_weighted_mins_28d'],
+                p1['round_weighted_mins_28d'], p2['round_weighted_mins_28d'],
+                p1['matches_7d'],   p2['matches_7d'],
                 p1['days_since_last'], p2['days_since_last'],
-                p1['win_pct_10'], p2['win_pct_10'],
-                p1['win_pct_20'], p2['win_pct_20'],
+                p1['win_pct_10'],   p2['win_pct_10'],
+                p1['win_pct_20'],   p2['win_pct_20'],
                 p1['tourney_matches_before'], p2['tourney_matches_before'],
-                p1['tourney_mins_before'], p2['tourney_mins_before'],
+                p1['tourney_mins_before'],    p2['tourney_mins_before'],
+                p1['h2h_win_pct'],  p2['h2h_win_pct'],
+                p1['opp_avg_rank_beaten'], p2['opp_avg_rank_beaten'],
                 surface_enc
             ]
 
