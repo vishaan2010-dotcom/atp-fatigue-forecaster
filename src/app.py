@@ -2,10 +2,11 @@
 ATP Fatigue Forecaster — Research-Grade ML Dashboard
 Built on real rolling physiological load features from JeffSackmann/tennis_atp.
 
-v3 upgrades:
+v4 upgrades:
   - Model Performance tab with baseline comparisons (Higher-Rank, Rank-Logistic, Elo)
   - Ablation study tab: empirically demonstrates lift from physiological-load features
   - Match Predictor with rest-day counterfactual slider (what-if analysis)
+  - IN-MATCH WIN PROBABILITY tab: trained on Match Charting Project point-by-point data
 """
 
 import time
@@ -246,9 +247,8 @@ ROUND_FATIGUE_WEIGHT = {
     'QF': 1.0, 'SF': 1.15, 'F': 1.3, 'RR': 0.85
 }
 
-# Feature groupings for ablation study — each maps to research framework stages
 RANKING_FEATURES = ['p1_rank', 'p2_rank']
-LOAD_FEATURES = [  # Stage 1 cascade signals
+LOAD_FEATURES = [
     'p1_cum_mins_7d', 'p2_cum_mins_7d',
     'p1_cum_mins_14d', 'p2_cum_mins_14d',
     'p1_cum_mins_28d', 'p2_cum_mins_28d',
@@ -259,7 +259,7 @@ LOAD_FEATURES = [  # Stage 1 cascade signals
     'p1_tourney_matches_before', 'p2_tourney_matches_before',
     'p1_tourney_mins_before', 'p2_tourney_mins_before',
 ]
-FORM_FEATURES = [  # Stage 3-5 downstream effects
+FORM_FEATURES = [
     'p1_win_pct_10', 'p2_win_pct_10',
     'p1_win_pct_20', 'p2_win_pct_20',
 ]
@@ -385,6 +385,109 @@ def engineer_features(df_raw: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────
+# IN-MATCH WIN PROBABILITY MODEL
+# Data: Jeff Sackmann Match Charting Project (CC BY-NC-SA 4.0)
+# https://github.com/JeffSackmann/tennis_MatchChartingProject
+# ─────────────────────────────────────────────
+INMATCH_URL = "https://raw.githubusercontent.com/JeffSackmann/tennis_MatchChartingProject/master/charting-m-points-2020s.csv"
+BO5_TOURNEYS = ['Australian_Open', 'Roland_Garros', 'Wimbledon', 'US_Open']
+INMATCH_FEATURES = [
+    'set_diff', 'game_diff', 'is_p1_serving', 'pt_number',
+    'total_sets', 'is_tiebreak', 'game_total',
+    'score_advantage_strength', 'is_best_of_5', 'is_decisive_set',
+]
+
+def _infer_best_of_5(match_id):
+    if not isinstance(match_id, str):
+        return 0
+    return int(any(t in match_id for t in BO5_TOURNEYS))
+
+def _build_inmatch_features(df):
+    """Compute the 10 score-state features (P1 perspective) on a points dataframe."""
+    df['set_diff']                 = df['Set1'] - df['Set2']
+    df['game_diff']                = df['Gm1'] - df['Gm2']
+    df['is_p1_serving']            = (df['Svr'] == 1).astype(int)
+    df['pt_number']                = df['Pt']
+    df['total_sets']               = df['Set1'] + df['Set2']
+    df['is_tiebreak']              = ((df['Gm1'] == 6) & (df['Gm2'] == 6)).astype(int)
+    df['game_total']               = df['Gm1'] + df['Gm2']
+    df['score_advantage_strength'] = df['set_diff'].abs() * 2 + df['game_diff'].abs()
+    df['is_best_of_5']             = df['match_id'].apply(_infer_best_of_5)
+    df['max_sets_to_win']          = df['is_best_of_5'].apply(lambda x: 3 if x else 2)
+    df['is_decisive_set']          = (df['total_sets'] == (df['max_sets_to_win'] * 2 - 2)).astype(int)
+    return df
+
+@st.cache_resource(show_spinner=False)
+def train_inmatch_model():
+    """Train the in-match win-probability GBM on Match Charting Project data."""
+    df = pd.read_csv(INMATCH_URL, low_memory=False)
+
+    last = df.groupby('match_id').tail(1).copy()
+    last['p1_won_match'] = (last['Set1'] > last['Set2']).astype(int)
+    df = df.merge(last[['match_id', 'p1_won_match']], on='match_id', how='left')
+
+    df = _build_inmatch_features(df)
+    df['target'] = df['p1_won_match']
+    df = df.dropna(subset=INMATCH_FEATURES + ['target'])
+
+    # Symmetry augmentation (removes P1/P2 labeling bias)
+    sw = df.copy()
+    sw['set_diff']      = -df['set_diff']
+    sw['game_diff']     = -df['game_diff']
+    sw['is_p1_serving'] = 1 - df['is_p1_serving']
+    sw['target']        = 1 - df['target']
+    df_full = pd.concat([df, sw], ignore_index=True)
+
+    # Split by match (no leakage)
+    matches = df_full['match_id'].unique().tolist()
+    np.random.seed(42)
+    np.random.shuffle(matches)
+    split = int(len(matches) * 0.8)
+    train_ids = set(matches[:split])
+    train_df = df_full[df_full['match_id'].isin(train_ids)]
+    test_df  = df_full[~df_full['match_id'].isin(train_ids)]
+
+    X_tr, y_tr = train_df[INMATCH_FEATURES].values, train_df['target'].values
+    X_te, y_te = test_df[INMATCH_FEATURES].values,  test_df['target'].values
+
+    model = GradientBoostingClassifier(
+        n_estimators=200, learning_rate=0.05, max_depth=4,
+        subsample=0.8, random_state=42
+    )
+    model.fit(X_tr, y_tr)
+
+    y_prob = model.predict_proba(X_te)[:, 1]
+    metrics = {
+        'auc':   roc_auc_score(y_te, y_prob),
+        'brier': brier_score_loss(y_te, y_prob),
+        'n_matches': df['match_id'].nunique(),
+        'n_points':  len(df),
+    }
+    return model, metrics
+
+def inmatch_win_prob(model, set1, set2, gm1, gm2, p1_serving, pt_number, is_bo5):
+    """Given a score state, return P(P1 wins the match)."""
+    set_diff   = set1 - set2
+    game_diff  = gm1 - gm2
+    total_sets = set1 + set2
+    max_sets   = 3 if is_bo5 else 2
+    row = {
+        'set_diff': set_diff,
+        'game_diff': game_diff,
+        'is_p1_serving': int(p1_serving),
+        'pt_number': pt_number,
+        'total_sets': total_sets,
+        'is_tiebreak': int(gm1 == 6 and gm2 == 6),
+        'game_total': gm1 + gm2,
+        'score_advantage_strength': abs(set_diff) * 2 + abs(game_diff),
+        'is_best_of_5': int(is_bo5),
+        'is_decisive_set': int(total_sets == (max_sets * 2 - 2)),
+    }
+    X = pd.DataFrame([[row[c] for c in INMATCH_FEATURES]], columns=INMATCH_FEATURES)
+    return model.predict_proba(X)[0][1]
+
+
+# ─────────────────────────────────────────────
 # MODEL TRAINING (full feature model)
 # ─────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
@@ -431,14 +534,10 @@ def train_model(_df: pd.DataFrame):
 
 
 # ─────────────────────────────────────────────
-# BASELINES & ABLATION (NEW)
+# BASELINES & ABLATION
 # ─────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def evaluate_baselines_and_ablations(_df: pd.DataFrame):
-    """
-    Evaluate non-ML baselines AND feature-group ablations.
-    Returns a dict of {model_name: {metrics}} for the same temporal test split.
-    """
     feature_cols = [c for c in _df.columns if c != 'p1_wins']
     X_full = _df[feature_cols].values
     y      = _df['p1_wins'].values
@@ -448,11 +547,8 @@ def evaluate_baselines_and_ablations(_df: pd.DataFrame):
     test_slice = _df.iloc[split:].reset_index(drop=True)
     results = {}
 
-    # ── Baseline 1: Higher-Rank-Wins (no ML) ──────────────────────────────
-    # Predict P1 wins iff p1_rank < p2_rank (lower rank number = better)
     higher_rank_pred = (test_slice['p1_rank'] < test_slice['p2_rank']).astype(int).values
-    # Probability proxy: rank-distance sigmoid
-    rank_diff = (test_slice['p2_rank'] - test_slice['p1_rank']).values  # positive = P1 better
+    rank_diff = (test_slice['p2_rank'] - test_slice['p1_rank']).values
     higher_rank_prob = 1 / (1 + np.exp(-rank_diff / 30))
     results['Higher-Rank Wins'] = {
         'accuracy':  accuracy_score(y_test, higher_rank_pred),
@@ -463,7 +559,6 @@ def evaluate_baselines_and_ablations(_df: pd.DataFrame):
         'features':  2,
     }
 
-    # ── Baseline 2: Rank-only Logistic Regression ─────────────────────────
     rank_cols = ['p1_rank', 'p2_rank']
     X_rank_train = _df[rank_cols].values[:split]
     X_rank_test  = _df[rank_cols].values[split:]
@@ -480,17 +575,9 @@ def evaluate_baselines_and_ablations(_df: pd.DataFrame):
         'features':  2,
     }
 
-    # ── Baseline 3: Simple Elo (computed in-loop) ─────────────────────────
-    # We recompute Elo from raw history for the test window.
-    # For this dataset the dataframe is already temporally sorted.
-    K = 32
-    elo = {}  # player_pseudo_id -> rating
     elo_probs = []
     elo_preds = []
     for _, r in test_slice.iterrows():
-        # We don't have player IDs in engineered df; use rank as a stable pseudo-key
-        # Fall back to rank-based Elo proxy.
-        # Better: pre-compute Elo offline. For now, derive expected score from rank proxy.
         p1_rating = 1500 + (300 - min(r['p1_rank'], 300)) * 2
         p2_rating = 1500 + (300 - min(r['p2_rank'], 300)) * 2
         expected_p1 = 1 / (1 + 10 ** ((p2_rating - p1_rating) / 400))
@@ -507,23 +594,16 @@ def evaluate_baselines_and_ablations(_df: pd.DataFrame):
         'features':  2,
     }
 
-    # ── Ablation: GBM with progressively richer feature sets ──────────────
     ablation_specs = [
-        ('GBM: Ranking only',
-         RANKING_FEATURES,
-         'Rank features only'),
-        ('GBM: + Physiological Load',
-         RANKING_FEATURES + LOAD_FEATURES,
+        ('GBM: Ranking only', RANKING_FEATURES, 'Rank features only'),
+        ('GBM: + Physiological Load', RANKING_FEATURES + LOAD_FEATURES,
          'Adds 7/14/28d court minutes, weighted load, rest days, tourney load'),
-        ('GBM: + Form',
-         RANKING_FEATURES + LOAD_FEATURES + FORM_FEATURES,
+        ('GBM: + Form', RANKING_FEATURES + LOAD_FEATURES + FORM_FEATURES,
          'Adds rolling win % over last 10 and 20 matches'),
         ('GBM: + H2H + Quality',
          RANKING_FEATURES + LOAD_FEATURES + FORM_FEATURES + H2H_FEATURES + QUALITY_FEATURES,
          'Adds head-to-head record and opponent-quality (strength of schedule)'),
-        ('GBM: Full (all features)',
-         feature_cols,
-         'All features including surface'),
+        ('GBM: Full (all features)', feature_cols, 'All features including surface'),
     ]
 
     for name, cols, desc in ablation_specs:
@@ -778,7 +858,6 @@ def render_calibration_chart(y_test, y_prob):
 
 
 def render_roc_comparison(y_test, model_probs_dict):
-    """ROC curves for the full model vs each baseline."""
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode='lines',
                               line=dict(dash='dash', color='#5A5A5A'), name='Random (AUC=0.5)'))
@@ -801,7 +880,6 @@ def render_roc_comparison(y_test, model_probs_dict):
 
 
 def render_ablation_chart(ablation_results):
-    """Bar chart showing AUC lift from each ablation step."""
     ablation_order = [
         'GBM: Ranking only',
         'GBM: + Physiological Load',
@@ -853,10 +931,10 @@ def main():
         </div>
         <div style="margin-top: 14px; display: flex; gap: 24px; flex-wrap: wrap;">
             <div style="font-family: 'DM Mono', monospace; font-size: 11px; color: #7A7A7A;">
-                📄 &nbsp;<span style="color:#C4622D;">"The Breaking Point"</span> — NHSJS, 2025
+                📄 &nbsp;<span style="color:#C4622D;">"The Breaking Point"</span> — NHSJS, 2026
             </div>
             <div style="font-family: 'DM Mono', monospace; font-size: 11px; color: #7A7A7A;">
-                📊 &nbsp;Data: JeffSackmann/tennis_atp (8-year ATP match records)
+                📊 &nbsp;Data: JeffSackmann/tennis_atp (8-year ATP match records) + Match Charting Project
             </div>
             <div style="font-family: 'DM Mono', monospace; font-size: 11px; color: #7A7A7A;">
                 🧠 &nbsp;Model: Calibrated Gradient Boosting · PRISMA-guided feature design
@@ -998,16 +1076,16 @@ def main():
     run = st.sidebar.button("Run Inference", type="primary", use_container_width=True)
 
     # ── TABS ──
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "MATCH INFERENCE", "MODEL PERFORMANCE", "ABLATION STUDY", "KEY FINDINGS", "METHODOLOGY"
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "MATCH INFERENCE", "MODEL PERFORMANCE", "ABLATION STUDY",
+        "KEY FINDINGS", "METHODOLOGY", "IN-MATCH WIN PROBABILITY"
     ])
 
     # ════════════════════════════════════════════════════════════
-    # TAB 2: MODEL PERFORMANCE — full model vs baselines
+    # TAB 2: MODEL PERFORMANCE
     # ════════════════════════════════════════════════════════════
     with tab2:
         st.markdown('<div class="section-label">Validation: Full Model vs. Baselines</div>', unsafe_allow_html=True)
-
         st.markdown("""
         <div style="font-family:'DM Sans',sans-serif; font-size:14px; color:#C8C8C8; line-height:1.7; margin-bottom:20px;">
         A model is only meaningful if it outperforms simpler alternatives. Below, the full Calibrated GBM is
@@ -1017,7 +1095,6 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-        # Headline metrics for the full model
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Test Accuracy",  f"{metrics['accuracy']:.2%}")
         c2.metric("ROC-AUC",        f"{metrics['roc_auc']:.3f}")
@@ -1027,7 +1104,6 @@ def main():
 
         st.divider()
 
-        # Comparison table
         st.markdown("**Head-to-Head Comparison**")
         full_row = {
             'Model':     'Full Model (Calibrated GBM)',
@@ -1058,7 +1134,6 @@ def main():
         comp_df['Log Loss'] = comp_df['Log Loss'].map(lambda x: f'{x:.3f}')
         st.dataframe(comp_df, use_container_width=True, hide_index=True)
 
-        # Lift over best baseline
         best_baseline_auc = max(eval_results[k]['roc_auc'] for k in baseline_keys)
         lift = metrics['roc_auc'] - best_baseline_auc
         lift_pct = 100 * lift / best_baseline_auc
@@ -1080,7 +1155,6 @@ def main():
 
         st.divider()
 
-        # ROC curves & calibration side-by-side
         ca, cb = st.columns(2)
         with ca:
             st.markdown("**ROC Curves: Full Model vs Baselines**")
@@ -1118,11 +1192,10 @@ def main():
         render_feature_importance(importances, feature_cols)
 
     # ════════════════════════════════════════════════════════════
-    # TAB 3: ABLATION STUDY — does load actually add lift?
+    # TAB 3: ABLATION STUDY
     # ════════════════════════════════════════════════════════════
     with tab3:
         st.markdown('<div class="section-label">Ablation: Empirical Validation of the Research Hypothesis</div>', unsafe_allow_html=True)
-
         st.markdown("""
         <div style="font-family:'DM Sans',sans-serif; font-size:14px; color:#C8C8C8; line-height:1.7; margin-bottom:20px;">
         The systematic review's central hypothesis is that <strong style="color:#E8E8E8;">physiological load
@@ -1134,7 +1207,6 @@ def main():
 
         st.plotly_chart(render_ablation_chart(eval_results), use_container_width=True)
 
-        # Build human-readable ablation table
         ablation_keys = [
             'GBM: Ranking only',
             'GBM: + Physiological Load',
@@ -1160,7 +1232,6 @@ def main():
             prev_auc = r['roc_auc']
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-        # Compute the headline lift
         if 'GBM: Ranking only' in eval_results and 'GBM: + Physiological Load' in eval_results:
             base_auc = eval_results['GBM: Ranking only']['roc_auc']
             with_load_auc = eval_results['GBM: + Physiological Load']['roc_auc']
@@ -1194,7 +1265,7 @@ def main():
         """)
 
     # ════════════════════════════════════════════════════════════
-    # TAB 4 & TAB 5: KEY FINDINGS, METHODOLOGY (kept from v2)
+    # TAB 4: KEY FINDINGS
     # ════════════════════════════════════════════════════════════
     with tab4:
         st.markdown('<div class="section-label">From the Systematic Review · 10 Studies · 847 Records Screened</div>', unsafe_allow_html=True)
@@ -1206,10 +1277,10 @@ def main():
                 THE BREAKING POINT — Abstract
             </div>
             <div style="font-family:'DM Sans',sans-serif; font-size:14px; color:#C8C8C8; line-height:1.8;">
-                Peer-reviewed systematic review (NHSJS, 2025) of PubMed, Google Scholar, and SPORTDiscus (2002–2023)
+                Peer-reviewed systematic review (NHSJS, 2026) of PubMed, Google Scholar, and SPORTDiscus (2002–2023)
                 following PRISMA 2020 guidelines. Ten studies were synthesized. A distinct dissociation was found between
-                power and precision under fatigue: <strong style="color:#E8E8E8;">serve velocity declined only 0.4–3.1%</strong>,
-                while <strong style="color:#E8E8E8;">serve accuracy degraded 25–32% and groundstroke accuracy up to 69%</strong>.
+                power and precision under fatigue: <strong style="color:#E8E8E8;">serve velocity declined only 0.4–2.8%</strong>,
+                while <strong style="color:#E8E8E8;">serve accuracy degraded 25–41% and groundstroke accuracy up to 69%</strong>.
                 Reaction time delayed 47–68 ms; decision-making quality declined 18–34%.
             </div>
         </div>
@@ -1221,9 +1292,9 @@ def main():
             st.markdown("""
             The most counterintuitive finding of the review: **fatigue does not slow players down — it makes them inaccurate.**
 
-            Across the included primary studies, serve velocity under fatigued conditions fell by less than 3.1% — within
+            Across the included primary studies, serve velocity under fatigued conditions fell by less than 2.8% — within
             normal match variation and statistically non-significant in most protocols. Yet in the same conditions,
-            serve accuracy dropped 25–32% and groundstroke accuracy collapsed by up to **69%** in high-intensity protocols
+            serve accuracy dropped 25–41% and groundstroke accuracy collapsed by up to **69%** in high-intensity protocols
             (Davey et al., 2002).
 
             This challenges the traditional definition of fatigue as "reduced force production"
@@ -1233,7 +1304,7 @@ def main():
         with col_va2:
             paradox_df = pd.DataFrame({
                 'Metric': ['Serve Velocity', 'Serve Accuracy', 'Groundstroke Accuracy'],
-                'Avg Decline (%)': [1.8, 28.5, 54.0],
+                'Avg Decline (%)': [1.8, 33.0, 54.0],
             })
             fig_paradox = go.Figure()
             colors = ['#4A7FC4', '#C4622D', '#A83232']
@@ -1264,13 +1335,13 @@ def main():
 
         stages = [
             ("Stage 1", "Lower-Body Fatigue", "#C4622D",
-             "Metabolic fatigue in the quadriceps and gastrocnemius causes reduced knee flexion (15–23°) and declining ground reaction force. The earliest measurable signal of cascade onset."),
+             "Metabolic fatigue in the quadriceps and gastrocnemius causes reduced knee flexion (~6° over 3 sets per Fenter et al. 2017) and declining ground reaction force. The earliest measurable signal of cascade onset."),
             ("Stage 2", "Kinetic Chain Compensation", "#B85A28",
-             "The CNS prioritizes force maintenance. Trunk rotation velocity increases 8–12% to compensate for lost leg drive — preserving ball speed at a structural cost."),
+             "The CNS prioritizes force maintenance. Trunk rotation increases to compensate for lost leg drive — preserving ball speed at a structural cost."),
             ("Stage 3", "Precision Loss", "#A0491E",
-             "Compensatory proximal recruitment destabilizes distal fine motor control. Velocity holds, but placement collapses: serve accuracy −25–32%, groundstrokes −38–69%."),
+             "Compensatory proximal recruitment destabilizes distal fine motor control. Velocity holds, but placement collapses: serve accuracy −25–41%, groundstrokes up to −69%."),
             ("Stage 4", "Range of Motion Restriction", "#8A3A16",
-             "Continued fatigue restricts hip rotation ROM (~13°), reducing topspin generation. Shots flatten out — a tactical liability even if power is intact."),
+             "Continued fatigue restricts rotational range of motion, reducing topspin generation. Shots flatten out — a tactical liability even if power is intact."),
             ("Stage 5", "Cognitive Failure", "#6E2B0E",
              "Systemic fatigue impairs executive function: reaction time delays of 47–68 ms, and decision-making quality declines 18–34%."),
         ]
@@ -1298,6 +1369,9 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
+    # ════════════════════════════════════════════════════════════
+    # TAB 5: METHODOLOGY
+    # ════════════════════════════════════════════════════════════
     with tab5:
         st.markdown('<div class="section-label">Research Design & ML Implementation</div>', unsafe_allow_html=True)
         col_m, col_r = st.columns([3, 2])
@@ -1367,12 +1441,12 @@ signals approximated by court time.
 **Citation**
 
 *"The Breaking Point: A Systematic Review of Physiological and Cognitive Fatigue Effects on
-Professional Tennis Performance"* — National High School Journal of Science (NHSJS), 2025.
+Professional Tennis Performance"* — National High School Journal of Science (NHSJS), 2026.
 PRISMA-compliant systematic review (847 records → 10 included). PubMed · Google Scholar · SPORTDiscus.
         """)
 
     # ════════════════════════════════════════════════════════════
-    # TAB 1: MATCH INFERENCE — with rest-day counterfactual
+    # TAB 1: MATCH INFERENCE (with counterfactual analysis)
     # ════════════════════════════════════════════════════════════
     with tab1:
         st.markdown('<div class="section-label">Pre-Match Analysis</div>', unsafe_allow_html=True)
@@ -1483,9 +1557,6 @@ PRISMA-compliant systematic review (847 records → 10 included). PubMed · Goog
             commentary = generate_commentary(prob_p1, p1, p2, name1, name2, surface_name)
             st.markdown(f'<div class="verdict">{commentary}</div>', unsafe_allow_html=True)
 
-            # ════════════════════════════════════════════════════════
-            # COUNTERFACTUAL — sweep rest days and load for both players
-            # ════════════════════════════════════════════════════════
             st.divider()
             st.markdown('<div class="section-label">Counterfactual Analysis · What-If Simulator</div>', unsafe_allow_html=True)
             st.markdown("""
@@ -1498,7 +1569,6 @@ PRISMA-compliant systematic review (847 records → 10 included). PubMed · Goog
 
             cf_col1, cf_col2 = st.columns(2)
 
-            # ── Counterfactual 1: P1 rest-day sweep ──
             with cf_col1:
                 st.markdown(f"**If {name1} had X more rest days...**")
                 rest_sweep = list(range(0, 15))
@@ -1542,7 +1612,6 @@ PRISMA-compliant systematic review (847 records → 10 included). PubMed · Goog
                 </div>
                 """, unsafe_allow_html=True)
 
-            # ── Counterfactual 2: P2 28-day load sweep ──
             with cf_col2:
                 st.markdown(f"**If {name2}'s 28-day load varies...**")
                 load_sweep = list(range(0, 1300, 100))
@@ -1588,6 +1657,128 @@ PRISMA-compliant systematic review (847 records → 10 included). PubMed · Goog
 
             st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
             st.markdown("**Disclaimer:** This tool is for research purposes only and is not intended for betting or wagering.")
+
+    # ════════════════════════════════════════════════════════════
+    # TAB 6: IN-MATCH WIN PROBABILITY (Match Charting Project data)
+    # ════════════════════════════════════════════════════════════
+    with tab6:
+        st.markdown('<div class="section-label">Live-Style Win Probability · Real Point-by-Point Data</div>', unsafe_allow_html=True)
+
+        st.markdown("""
+        <div style="font-family:'DM Sans',sans-serif; font-size:14px; color:#C8C8C8; line-height:1.7; margin-bottom:20px;">
+        This model estimates a player's probability of <strong style="color:#E8E8E8;">winning the match</strong> from
+        the current <strong style="color:#E8E8E8;">score state</strong> alone — sets, games, who is serving, and match format.
+        Unlike the pre-match model, it answers: <em>given where the match stands right now, who is winning?</em>
+        Set a scoreline below and watch the probability update.
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.spinner("Loading in-match model (first load trains it, ~2 min)..."):
+            inmatch_model, inmatch_metrics = train_inmatch_model()
+
+        mc1, mc2, mc3 = st.columns(3)
+        mc1.metric("Model AUC", f"{inmatch_metrics['auc']:.3f}")
+        mc2.metric("Matches Trained On", f"{inmatch_metrics['n_matches']:,}")
+        mc3.metric("Points Trained On", f"{inmatch_metrics['n_points']:,}")
+
+        st.divider()
+
+        st.markdown("**Set the current match state**")
+        fmt_col, srv_col = st.columns(2)
+        with fmt_col:
+            match_format = st.radio("Match format", ["Best of 3", "Best of 5"], horizontal=True)
+            is_bo5 = (match_format == "Best of 5")
+        with srv_col:
+            server = st.radio("Who is serving?", ["Player 1", "Player 2"], horizontal=True)
+            p1_serving = (server == "Player 1")
+
+        max_sets = 3 if is_bo5 else 2
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            st.markdown("**Player 1**")
+            p1_sets  = st.number_input("P1 Sets won", 0, max_sets, 1, key="im_p1s")
+            p1_games = st.number_input("P1 Games (current set)", 0, 7, 4, key="im_p1g")
+        with sc2:
+            st.markdown("**Player 2**")
+            p2_sets  = st.number_input("P2 Sets won", 0, max_sets, 0, key="im_p2s")
+            p2_games = st.number_input("P2 Games (current set)", 0, 7, 3, key="im_p2g")
+
+        pt_number = st.slider("Approx. point number in match", 1, 300, 80, key="im_pt")
+
+        prob_p1_inmatch = inmatch_win_prob(
+            inmatch_model, p1_sets, p2_sets, p1_games, p2_games,
+            p1_serving, pt_number, is_bo5
+        )
+
+        st.divider()
+        st.markdown('<div class="section-label">Current Win Probability</div>', unsafe_allow_html=True)
+        render_prob_bar(prob_p1_inmatch, "Player 1", "Player 2")
+
+        leader = "Player 1" if prob_p1_inmatch >= 0.5 else "Player 2"
+        lead_prob = max(prob_p1_inmatch, 1 - prob_p1_inmatch)
+        st.markdown(f"""
+        <div class="verdict">
+            At this score state, the model gives <strong>{leader}</strong> a
+            <strong>{lead_prob:.1%}</strong> chance of winning the match.
+            Score: P1 {p1_sets}-{p2_sets} sets, {p1_games}-{p2_games} games this set;
+            {"P1" if p1_serving else "P2"} serving.
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.divider()
+        st.markdown('<div class="section-label">How Win Probability Shifts as P1 Wins More Games</div>', unsafe_allow_html=True)
+        st.markdown("""
+        <div style="font-family:'DM Sans',sans-serif; font-size:13px; color:#A0A0A0; line-height:1.7; margin-bottom:12px;">
+            Holding sets and server fixed, this traces how the model's win probability for Player 1
+            changes as P1's game count in the current set increases from 0 to 6.
+        </div>
+        """, unsafe_allow_html=True)
+
+        game_range = list(range(0, 7))
+        traj = [
+            inmatch_win_prob(inmatch_model, p1_sets, p2_sets, g, p2_games,
+                             p1_serving, pt_number, is_bo5)
+            for g in game_range
+        ]
+        fig_traj = go.Figure()
+        fig_traj.add_trace(go.Scatter(
+            x=game_range, y=traj, mode='lines+markers',
+            line=dict(color='#4A7FC4', width=2), marker=dict(size=7, color='#4A7FC4')
+        ))
+        fig_traj.add_hline(y=0.5, line_dash='dot', line_color='#5A5A5A',
+                           annotation_text='50%',
+                           annotation_font=dict(family='DM Mono', size=9, color='#5A5A5A'))
+        fig_traj.add_vline(x=p1_games, line_dash='dash', line_color='#C4622D',
+                           annotation_text=f'Current: {p1_games}',
+                           annotation_font=dict(family='DM Mono', size=9, color='#C4622D'))
+        fig_traj.update_layout(
+            xaxis_title='P1 Games in Current Set', yaxis_title='P(Player 1 wins match)',
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#E8E8E8', family='DM Mono', size=10),
+            xaxis=dict(gridcolor='#2E2E2E'),
+            yaxis=dict(gridcolor='#2E2E2E', tickformat='.0%', range=[0, 1]),
+            height=320, margin=dict(l=10, r=10, t=20, b=10), showlegend=False
+        )
+        st.plotly_chart(fig_traj, use_container_width=True)
+
+        st.divider()
+        st.markdown("""
+        **How this model works.** A gradient-boosting classifier trained on real point-by-point data
+        from the Match Charting Project. For each point, it uses the score state (set difference, game
+        difference, server, point number, tiebreak status, match format, decisive-set flag) to estimate
+        the probability that Player 1 wins the match. Training used symmetric augmentation (every point
+        duplicated with players swapped) to remove the dataset's Player-1 labeling bias, and a
+        match-level train/test split to prevent leakage between points of the same match.
+
+        **Honest limitations.** This model uses *score state only* — it does not know player identity,
+        ranking, or fatigue, so it cannot tell that a stronger player is more likely to come back. Test
+        AUC is ~0.81; commercial in-match models reach higher by incorporating player ratings and
+        live serve/rally data. I tested isotonic calibration but kept the uncalibrated model, which
+        scored better on Brier and log-loss for this dataset.
+
+        **Data:** Jeff Sackmann's [Match Charting Project](https://github.com/JeffSackmann/tennis_MatchChartingProject),
+        licensed CC BY-NC-SA 4.0 (non-commercial, attribution required). Used here for non-commercial research.
+        """)
 
 
 if __name__ == "__main__":
