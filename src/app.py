@@ -1,5 +1,5 @@
 """
-ATP Fatigue Forecaster — Research-Grade ML Dashboard
+ATP Fatigue Forecaster - Research-Grade ML Dashboard
 Built on real rolling physiological load features from JeffSackmann/tennis_atp.
 
 v4 upgrades:
@@ -12,8 +12,11 @@ v4 upgrades:
 import time
 import logging
 import datetime
+import io
+import socket
 import warnings
 import urllib.error
+import urllib.request
 
 import streamlit as st
 import pandas as pd
@@ -32,6 +35,15 @@ from sklearn.pipeline import Pipeline
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+ATP_MATCH_URL_TEMPLATES = [
+    # Canonical Jeff Sackmann source. Try both URL styles because GitHub has used both.
+    "https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_matches_{year}.csv",
+    "https://raw.githubusercontent.com/JeffSackmann/tennis_atp/refs/heads/master/atp_matches_{year}.csv",
+    # Same-schema public mirrors used only when the canonical repository is temporarily unavailable.
+    "https://raw.githubusercontent.com/YoavWeller/Tennis_Analysis/main/full_matches_data/atp_matches_{year}.csv",
+    "https://raw.githubusercontent.com/wlucilus/Data-Analysis-ATP-2024/main/atp_matches_{year}.csv",
+]
 
 # ─────────────────────────────────────────────
 # PAGE CONFIG
@@ -222,20 +234,77 @@ footer { visibility: hidden; }
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_raw_data(years: int = 8) -> pd.DataFrame:
+    """Fetch recent ATP match CSVs and combine them into one raw match table."""
     current_year = datetime.datetime.now().year
     frames = []
     for year in range(current_year, current_year - years - 1, -1):
-        url = f"https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_matches_{year}.csv"
+        label = f"ATP match data for {year}"
+        urls = [template.format(year=year) for template in ATP_MATCH_URL_TEMPLATES]
         try:
-            df_year = pd.read_csv(url, low_memory=False)
+            # Each season is independent, so a missing future/current-year file can be skipped safely.
+            df_year = read_first_available_csv(urls, label)
             frames.append(df_year)
-        except urllib.error.HTTPError:
-            logging.warning(f"{year} not yet published, skipping.")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                logging.warning(f"{year} not yet published, skipping.")
+            else:
+                warn_data_issue(f"{label} returned HTTP {e.code}; skipping that season.")
         except Exception as e:
-            logging.error(f"Error loading {year}: {e}")
+            warn_data_issue(f"{label} could not be loaded: {e}")
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
+
+
+def read_first_available_csv(urls: list[str], label: str) -> pd.DataFrame:
+    """Return the first readable CSV from a list of source URLs."""
+    failures = []
+    http_codes = []
+    for url in urls:
+        try:
+            return read_remote_csv(url, label)
+        except urllib.error.HTTPError as e:
+            http_codes.append(e.code)
+            failures.append(f"{url} returned HTTP {e.code}")
+        except Exception as e:
+            failures.append(f"{url} failed: {e}")
+    if http_codes and len(http_codes) == len(urls) and all(code == 404 for code in http_codes):
+        raise urllib.error.HTTPError(urls[0], 404, "No candidate source published this file.", None, None)
+    raise RuntimeError(f"{label} could not be loaded from any source. Last errors: {'; '.join(failures[-2:])}")
+
+
+def warn_data_issue(message: str) -> None:
+    """Log a non-fatal data issue and surface it in the Streamlit UI when possible."""
+    logging.warning(message)
+    try:
+        st.warning(message)
+    except Exception:
+        # Tests and non-Streamlit scripts may not have an active Streamlit context.
+        pass
+
+
+def read_remote_csv(url: str, label: str, timeout: int = 20) -> pd.DataFrame:
+    """Read a remote CSV with a timeout and explicit empty/HTTP/network errors."""
+    try:
+        # urlopen gives us a real timeout; pandas.read_csv(url) can otherwise hang too long.
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            payload = response.read()
+    except urllib.error.HTTPError:
+        raise
+    except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
+        raise RuntimeError(f"{label} request failed or timed out.") from e
+
+    if not payload:
+        raise RuntimeError(f"{label} returned an empty response.")
+
+    try:
+        df = pd.read_csv(io.BytesIO(payload), low_memory=False)
+    except pd.errors.EmptyDataError as e:
+        raise RuntimeError(f"{label} returned an empty CSV.") from e
+
+    if df.empty:
+        raise RuntimeError(f"{label} did not contain any rows.")
+    return df
 
 
 # ─────────────────────────────────────────────
@@ -273,11 +342,14 @@ SURFACE_FEATURE = ['surface']
 # ─────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def engineer_features(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """Create pre-match rolling load, form, H2H, quality, and surface features."""
     from collections import defaultdict
     required_cols = ['tourney_date', 'winner_id', 'loser_id', 'winner_rank', 'loser_rank',
                      'minutes', 'surface', 'tourney_id', 'round']
+    # Work only from complete rows needed for the deployed feature set.
     df = df_raw.dropna(subset=required_cols).copy()
     df['match_date'] = pd.to_datetime(df['tourney_date'], format='%Y%m%d', errors='coerce')
+    # Sorting by date is what makes the downstream positional hold-out chronological.
     df = df.dropna(subset=['match_date']).sort_values('match_date').reset_index(drop=True)
 
     round_order = {'R128': 1, 'R64': 2, 'R32': 3, 'R16': 4, 'QF': 5, 'SF': 6, 'F': 7, 'RR': 3}
@@ -293,6 +365,7 @@ def engineer_features(df_raw: pd.DataFrame) -> pd.DataFrame:
     rows = []
 
     for _, row in df.iterrows():
+        # Features are computed before this match is written into each player's history.
         w_id, l_id   = row['winner_id'], row['loser_id']
         w_rank, l_rank = row['winner_rank'], row['loser_rank']
         match_date   = row['match_date']
@@ -302,6 +375,7 @@ def engineer_features(df_raw: pd.DataFrame) -> pd.DataFrame:
         surface_enc  = row['surface_enc']
 
         def compute_features(pid, rank, opp_id, opp_rank):
+            """Summarize one player's available history before the current match."""
             hist = player_history[pid]
             empty = {
                 'rank': rank,
@@ -314,6 +388,7 @@ def engineer_features(df_raw: pd.DataFrame) -> pd.DataFrame:
             }
             if not hist:
                 return empty
+            # Histories contain only previous matches, so rolling windows stay pre-match.
             ts_arr    = np.array([h[0] for h in hist])
             wins_arr  = np.array([h[1] for h in hist])
             mins_arr  = np.array([h[2] for h in hist])
@@ -361,6 +436,7 @@ def engineer_features(df_raw: pd.DataFrame) -> pd.DataFrame:
         w_feats = compute_features(w_id, w_rank, l_id, l_rank)
         l_feats = compute_features(l_id, l_rank, w_id, w_rank)
 
+        # Randomize P1/P2 labels so the target is not tied to winner/loser ordering.
         if np.random.rand() > 0.5:
             p1_feats, p2_feats, p1_wins = w_feats, l_feats, 1
         else:
@@ -375,6 +451,7 @@ def engineer_features(df_raw: pd.DataFrame) -> pd.DataFrame:
         record['p1_wins'] = p1_wins
         rows.append(record)
 
+        # Update histories only after feature extraction to preserve pre-match information.
         ts = match_date.timestamp()
         player_history[w_id].append((ts, 1, mins, w_mins, tourney_id, row['round_num'], l_id, l_rank))
         player_history[l_id].append((ts, 0, mins, w_mins, tourney_id, row['round_num'], w_id, w_rank))
@@ -389,7 +466,7 @@ def engineer_features(df_raw: pd.DataFrame) -> pd.DataFrame:
 # Data: Jeff Sackmann Match Charting Project (CC BY-NC-SA 4.0)
 # https://github.com/JeffSackmann/tennis_MatchChartingProject
 # ─────────────────────────────────────────────
-INMATCH_URL = "https://raw.githubusercontent.com/JeffSackmann/tennis_MatchChartingProject/master/charting-m-points-2020s.csv"
+INMATCH_URL = "https://raw.githubusercontent.com/JeffSackmann/tennis_MatchChartingProject/refs/heads/master/charting-m-points-2020s.csv"
 BO5_TOURNEYS = ['Australian_Open', 'Roland_Garros', 'Wimbledon', 'US_Open']
 INMATCH_FEATURES = [
     'set_diff', 'game_diff', 'is_p1_serving', 'pt_number',
@@ -398,12 +475,14 @@ INMATCH_FEATURES = [
 ]
 
 def _infer_best_of_5(match_id):
+    """Infer whether a charted match is best-of-5 from Grand Slam match IDs."""
     if not isinstance(match_id, str):
         return 0
     return int(any(t in match_id for t in BO5_TOURNEYS))
 
 def _build_inmatch_features(df):
     """Compute the 10 score-state features (P1 perspective) on a points dataframe."""
+    # These features intentionally use score state only, not identity, ranking, or fatigue.
     df['set_diff']                 = df['Set1'] - df['Set2']
     df['game_diff']                = df['Gm1'] - df['Gm2']
     df['is_p1_serving']            = (df['Svr'] == 1).astype(int)
@@ -419,9 +498,10 @@ def _build_inmatch_features(df):
 
 @st.cache_resource(show_spinner=False)
 def train_inmatch_model():
-    """Train the in-match win-probability GBM on Match Charting Project data."""
-    df = pd.read_csv(INMATCH_URL, low_memory=False)
+    """Train the intentionally uncalibrated in-match GBM on point-by-point data."""
+    df = read_remote_csv(INMATCH_URL, "Match Charting Project point data")
 
+    # The final point stores the completed match score, which gives the match winner.
     last = df.groupby('match_id').tail(1).copy()
     last['p1_won_match'] = (last['Set1'] > last['Set2']).astype(int)
     df = df.merge(last[['match_id', 'p1_won_match']], on='match_id', how='left')
@@ -429,6 +509,8 @@ def train_inmatch_model():
     df = _build_inmatch_features(df)
     df['target'] = df['p1_won_match']
     df = df.dropna(subset=INMATCH_FEATURES + ['target'])
+    if df.empty:
+        raise RuntimeError("Match Charting Project point data had no usable score-state rows.")
 
     # Symmetry augmentation (removes P1/P2 labeling bias)
     sw = df.copy()
@@ -438,7 +520,7 @@ def train_inmatch_model():
     sw['target']        = 1 - df['target']
     df_full = pd.concat([df, sw], ignore_index=True)
 
-    # Split by match (no leakage)
+    # Split by match so points from the same match do not appear in both train and test.
     matches = df_full['match_id'].unique().tolist()
     np.random.seed(42)
     np.random.shuffle(matches)
@@ -454,6 +536,7 @@ def train_inmatch_model():
         n_estimators=200, learning_rate=0.05, max_depth=4,
         subsample=0.8, random_state=42
     )
+    # This model is deliberately left uncalibrated; isotonic calibration tested worse.
     model.fit(X_tr, y_tr)
 
     y_prob = model.predict_proba(X_te)[:, 1]
@@ -467,6 +550,7 @@ def train_inmatch_model():
 
 def inmatch_win_prob(model, set1, set2, gm1, gm2, p1_serving, pt_number, is_bo5):
     """Given a score state, return P(P1 wins the match)."""
+    # Mirror the training feature order exactly before sending one row to the model.
     set_diff   = set1 - set2
     game_diff  = gm1 - gm2
     total_sets = set1 + set2
@@ -492,9 +576,11 @@ def inmatch_win_prob(model, set1, set2, gm1, gm2, p1_serving, pt_number, is_bo5)
 # ─────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def train_model(_df: pd.DataFrame):
+    """Train and evaluate the calibrated pre-match Gradient Boosting classifier."""
     feature_cols = [c for c in _df.columns if c != 'p1_wins']
     X = _df[feature_cols].values
     y = _df['p1_wins'].values
+    # Chronological positional hold-out: features were date-sorted before this 80/20 split.
     split = int(len(X) * 0.8)
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
@@ -503,6 +589,7 @@ def train_model(_df: pd.DataFrame):
         n_estimators=300, learning_rate=0.05, max_depth=4,
         min_samples_split=20, subsample=0.8, random_state=42
     )
+    # Pre-match probabilities use isotonic calibration through CalibratedClassifierCV.
     model = CalibratedClassifierCV(base, cv=3, method='isotonic')
     model.fit(X_train, y_train)
 
@@ -526,6 +613,7 @@ def train_model(_df: pd.DataFrame):
     }
 
     try:
+        # The calibrated wrapper does not expose simple gain importances, so fit the base model for display.
         importances = base.fit(X_train, y_train).feature_importances_
     except Exception:
         importances = np.ones(len(feature_cols)) / len(feature_cols)
@@ -538,9 +626,11 @@ def train_model(_df: pd.DataFrame):
 # ─────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def evaluate_baselines_and_ablations(_df: pd.DataFrame):
+    """Compare the full model against baselines and staged feature ablations."""
     feature_cols = [c for c in _df.columns if c != 'p1_wins']
     X_full = _df[feature_cols].values
     y      = _df['p1_wins'].values
+    # Use the same chronological positional hold-out as the full pre-match model.
     split  = int(len(X_full) * 0.8)
     y_train, y_test = y[:split], y[split:]
 
@@ -548,6 +638,7 @@ def evaluate_baselines_and_ablations(_df: pd.DataFrame):
     results = {}
 
     higher_rank_pred = (test_slice['p1_rank'] < test_slice['p2_rank']).astype(int).values
+    # Convert rank difference into a smooth probability for AUC/Brier/log-loss comparisons.
     rank_diff = (test_slice['p2_rank'] - test_slice['p1_rank']).values
     higher_rank_prob = 1 / (1 + np.exp(-rank_diff / 30))
     results['Higher-Rank Wins'] = {
@@ -578,6 +669,7 @@ def evaluate_baselines_and_ablations(_df: pd.DataFrame):
     elo_probs = []
     elo_preds = []
     for _, r in test_slice.iterrows():
+        # This is a rank-derived Elo-style baseline, not an official Elo rating system.
         p1_rating = 1500 + (300 - min(r['p1_rank'], 300)) * 2
         p2_rating = 1500 + (300 - min(r['p2_rank'], 300)) * 2
         expected_p1 = 1 / (1 + 10 ** ((p2_rating - p1_rating) / 400))
@@ -607,6 +699,7 @@ def evaluate_baselines_and_ablations(_df: pd.DataFrame):
     ]
 
     for name, cols, desc in ablation_specs:
+        # Each ablation uses the same model family and hold-out, changing only feature groups.
         cols_present = [c for c in cols if c in _df.columns]
         X_a = _df[cols_present].values
         Xa_train, Xa_test = X_a[:split], X_a[split:]
@@ -636,6 +729,7 @@ def evaluate_baselines_and_ablations(_df: pd.DataFrame):
 # ─────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def build_player_stats(_df_raw: pd.DataFrame) -> dict:
+    """Build latest per-player lookup stats for the sidebar auto-population mode."""
     df = _df_raw.copy()
     df['match_date'] = pd.to_datetime(df['tourney_date'], format='%Y%m%d', errors='coerce')
     df = df.dropna(subset=['match_date', 'winner_name', 'loser_name']).sort_values('match_date')
@@ -657,9 +751,11 @@ def build_player_stats(_df_raw: pd.DataFrame) -> dict:
 
     h2h_pct = {}
     for (p1, p2), total in h2h_total.items():
+        # Store directional H2H percentages so each selected player has their own perspective.
         if total > 0:
             h2h_pct[(p1, p2)] = h2h_wins.get((p1, p2), 0) / total
 
+    # Use ranked matches with durations so the displayed player stats match model inputs.
     df_ranked = df.dropna(subset=['winner_rank', 'loser_rank', 'minutes'])
     all_players = pd.concat([
         df_ranked[['winner_name', 'winner_id', 'winner_rank']].rename(
@@ -670,6 +766,7 @@ def build_player_stats(_df_raw: pd.DataFrame) -> dict:
 
     stats = {}
     for _, prow in all_players.iterrows():
+        # Reconstruct one chronological match history per player from winner and loser rows.
         name = prow['name']
         pid  = prow['id']
         w_mask = df_ranked['winner_id'] == pid
@@ -717,6 +814,7 @@ def build_player_stats(_df_raw: pd.DataFrame) -> dict:
 # UI HELPERS
 # ─────────────────────────────────────────────
 def render_prob_bar(prob_p1: float, name1: str, name2: str):
+    """Render the split probability bar for a two-player prediction."""
     pct_p1 = int(prob_p1 * 100)
     pct_p2 = 100 - pct_p1
     st.markdown(f"""
@@ -728,6 +826,7 @@ def render_prob_bar(prob_p1: float, name1: str, name2: str):
 
 
 def render_feature_importance(importances, feature_cols):
+    """Render the top model feature importances as compact horizontal bars."""
     pairs = sorted(zip(importances, feature_cols), reverse=True)[:10]
     max_val = pairs[0][0] if pairs else 1
     label_map = {
@@ -762,7 +861,9 @@ def render_feature_importance(importances, feature_cols):
 
 
 def render_radar(p1_stats, p2_stats, name1, name2):
+    """Create a radar chart comparing rank, freshness, form, and recovery."""
     def normalize(rank, mins_28, win_pct, rest_days):
+        """Scale heterogeneous player stats onto a 0-100 display range."""
         rank_score   = max(0, 100 - rank / 5)
         fresh_score  = max(0, 100 - mins_28 / 12)
         form_score   = win_pct * 100
@@ -791,6 +892,7 @@ def render_radar(p1_stats, p2_stats, name1, name2):
 
 
 def generate_commentary(prob_p1, p1_stats, p2_stats, name1, name2, surface_name):
+    """Generate research-linked text commentary for a pre-match prediction."""
     lines = []
     winner = name1 if prob_p1 >= 0.5 else name2
     win_prob = max(prob_p1, 1 - prob_p1)
@@ -799,18 +901,18 @@ def generate_commentary(prob_p1, p1_stats, p2_stats, name1, name2, surface_name)
     elif win_prob > 0.58:
         lines.append(f"Model leans **{winner}** ({win_prob:.0%}), though the match remains competitive.")
     else:
-        lines.append(f"Essentially a coin flip — model gives **{winner}** a marginal edge at {win_prob:.0%}.")
+        lines.append(f"Essentially a coin flip, model gives **{winner}** a marginal edge at {win_prob:.0%}.")
 
     load_diff = p1_stats['cum_mins_28d'] - p2_stats['cum_mins_28d']
     heavier = name1 if load_diff > 0 else name2
     if abs(load_diff) > 200:
         lines.append(f"**Cascade Stage 1 signal**: {heavier} carries {abs(load_diff):.0f} more court minutes "
                      f"over 28 days. Per the Precision Degradation Cascade, this level of accumulated load "
-                     f"predicts measurable knee flexion reduction and compensatory trunk recruitment — "
+                     f"predicts measurable knee flexion reduction and compensatory trunk recruitment, "
                      f"the earliest indicators of precision breakdown.")
     elif abs(load_diff) > 80:
         lines.append(f"**Load differential**: {heavier} has logged {abs(load_diff):.0f} more minutes in the past 28 days. "
-                     f"A moderate Stage 1 fatigue signal — worth monitoring if this is a deep tournament run.")
+                     f"A moderate Stage 1 fatigue signal, worth monitoring if this is a deep tournament run.")
 
     rest_diff = p1_stats['days_since_last'] - p2_stats['days_since_last']
     more_rested = name1 if rest_diff > 0 else name2
@@ -822,24 +924,25 @@ def generate_commentary(prob_p1, p1_stats, p2_stats, name1, name2, surface_name)
     if abs(h2h_diff) > 0.15 and p1_stats['h2h_win_pct'] != 0.5:
         h2h_leader = name1 if h2h_diff > 0 else name2
         lines.append(f"**Head-to-head edge**: {h2h_leader} holds a meaningful historical advantage "
-                     f"in this specific matchup — H2H patterns are incorporated directly into the model's prediction.")
+                     f"in this specific matchup, H2H patterns are incorporated directly into the model's prediction.")
 
     opp_diff = p2_stats['opp_avg_rank_beaten'] - p1_stats['opp_avg_rank_beaten']
     if abs(opp_diff) > 20:
         stronger_sos = name1 if opp_diff > 0 else name2
         lines.append(f"**Strength of schedule**: {stronger_sos} has been beating higher-ranked opponents recently "
-                     f"— a signal of genuine form rather than accumulated wins against weaker fields.")
+                     f", a signal of genuine form rather than accumulated wins against weaker fields.")
 
     if surface_name == 'Clay':
         lines.append("**Surface factor**: Clay extends rally length and maximises cumulative load per match. "
                      "Fatigue features carry amplified predictive weight on this surface per the review's findings.")
     elif surface_name == 'Grass':
         lines.append("**Surface factor**: Grass rewards explosive bursts over sustained endurance. "
-                     "Shorter points compress the cascade timeline — Stage 5 cognitive effects may dominate over Stage 1–3.")
+                     "Shorter points compress the cascade timeline, Stage 5 cognitive effects may dominate over Stage 1-3.")
     return "  \n".join(lines)
 
 
 def render_calibration_chart(y_test, y_prob):
+    """Build a reliability diagram for predicted vs observed win frequencies."""
     frac, mean_pred = calibration_curve(y_test, y_prob, n_bins=10)
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode='lines',
@@ -858,6 +961,7 @@ def render_calibration_chart(y_test, y_prob):
 
 
 def render_roc_comparison(y_test, model_probs_dict):
+    """Plot ROC curves for the full model and baseline probability models."""
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode='lines',
                               line=dict(dash='dash', color='#5A5A5A'), name='Random (AUC=0.5)'))
@@ -880,6 +984,7 @@ def render_roc_comparison(y_test, model_probs_dict):
 
 
 def render_ablation_chart(ablation_results):
+    """Plot AUC by staged feature group for the ablation study."""
     ablation_order = [
         'GBM: Ranking only',
         'GBM: + Physiological Load',
@@ -919,6 +1024,7 @@ def render_ablation_chart(ablation_results):
 # MAIN APP
 # ─────────────────────────────────────────────
 def main():
+    """Render the Streamlit dashboard and coordinate data loading, modeling, and tabs."""
     st.markdown("""
     <div style="border-bottom: 1px solid #2E2E2E; padding-bottom: 24px; margin-bottom: 28px;">
         <div style="font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 4px; color: #C4622D; text-transform: uppercase; margin-bottom: 8px;">
@@ -926,12 +1032,12 @@ def main():
         </div>
         <h1 style="margin: 0; font-size: 3rem; letter-spacing: 4px; line-height: 1.1;">ATP FATIGUE FORECASTER</h1>
         <div style="font-family: 'DM Sans', sans-serif; font-size: 13px; color: #9A9A9A; margin-top: 10px; max-width: 780px; line-height: 1.6;">
-            A machine learning implementation of the <em>Precision Degradation Cascade</em> model —
+            A machine learning implementation of the <em>Precision Degradation Cascade</em> model,
             quantifying how physiological fatigue overrides baseline ATP ranking in professional match outcomes.
         </div>
         <div style="margin-top: 14px; display: flex; gap: 24px; flex-wrap: wrap;">
             <div style="font-family: 'DM Mono', monospace; font-size: 11px; color: #7A7A7A;">
-                📄 &nbsp;<span style="color:#C4622D;">"The Breaking Point"</span> — NHSJS, 2026
+                📄 &nbsp;<span style="color:#C4622D;">"The Breaking Point"</span> - NHSJS, 2026
             </div>
             <div style="font-family: 'DM Mono', monospace; font-size: 11px; color: #7A7A7A;">
                 📊 &nbsp;Data: JeffSackmann/tennis_atp (8-year ATP match records) + Match Charting Project
@@ -1036,11 +1142,11 @@ def main():
         name2 = st.sidebar.text_input("Player 2 Name", "Player 2")
         st.sidebar.markdown("**Player 1**")
         p1_rank = st.sidebar.number_input("P1 Rank", 1, 500, 10)
-        p1_m28  = st.sidebar.slider("P1 Load — 28d (mins)", 0, 1400, 400)
+        p1_m28  = st.sidebar.slider("P1 Load - 28d (mins)", 0, 1400, 400)
         p1 = {
             'rank': p1_rank,
-            'cum_mins_7d':  st.sidebar.slider("P1 Load — 7d",  0, 600,  120),
-            'cum_mins_14d': st.sidebar.slider("P1 Load — 14d", 0, 900,  240),
+            'cum_mins_7d':  st.sidebar.slider("P1 Load - 7d",  0, 600,  120),
+            'cum_mins_14d': st.sidebar.slider("P1 Load - 14d", 0, 900,  240),
             'cum_mins_28d': p1_m28,
             'surf_weighted_mins_28d':  p1_m28 * SURFACE_FATIGUE_WEIGHT.get(surface_name, 1.0),
             'round_weighted_mins_28d': p1_m28 * SURFACE_FATIGUE_WEIGHT.get(surface_name, 1.0),
@@ -1055,11 +1161,11 @@ def main():
         }
         st.sidebar.markdown("**Player 2**")
         p2_rank = st.sidebar.number_input("P2 Rank", 1, 500, 20)
-        p2_m28  = st.sidebar.slider("P2 Load — 28d (mins)", 0, 1400, 700)
+        p2_m28  = st.sidebar.slider("P2 Load - 28d (mins)", 0, 1400, 700)
         p2 = {
             'rank': p2_rank,
-            'cum_mins_7d':  st.sidebar.slider("P2 Load — 7d",  0, 600,  280),
-            'cum_mins_14d': st.sidebar.slider("P2 Load — 14d", 0, 900,  450),
+            'cum_mins_7d':  st.sidebar.slider("P2 Load - 7d",  0, 600,  280),
+            'cum_mins_14d': st.sidebar.slider("P2 Load - 14d", 0, 900,  450),
             'cum_mins_28d': p2_m28,
             'surf_weighted_mins_28d':  p2_m28 * SURFACE_FATIGUE_WEIGHT.get(surface_name, 1.0),
             'round_weighted_mins_28d': p2_m28 * SURFACE_FATIGUE_WEIGHT.get(surface_name, 1.0),
@@ -1089,9 +1195,10 @@ def main():
         st.markdown("""
         <div style="font-family:'DM Sans',sans-serif; font-size:14px; color:#C8C8C8; line-height:1.7; margin-bottom:20px;">
         A model is only meaningful if it outperforms simpler alternatives. Below, the full Calibrated GBM is
-        evaluated on the same temporal hold-out set against three baselines: a naive higher-rank-wins rule,
+        evaluated on the same chronological positional hold-out on date-sorted data against three baselines:
+        a naive higher-rank-wins rule,
         rank-only logistic regression, and an Elo-style expected-score formula. All models are evaluated on identical
-        unseen data (last 20% of matches by chronological order) — no future leakage.
+        held-out data: the last 20% of rows after sorting matches by date.
         </div>
         """, unsafe_allow_html=True)
 
@@ -1220,7 +1327,7 @@ def main():
             if k not in eval_results:
                 continue
             r = eval_results[k]
-            delta = '—' if prev_auc is None else f'{r["roc_auc"] - prev_auc:+.4f}'
+            delta = '-' if prev_auc is None else f'{r["roc_auc"] - prev_auc:+.4f}'
             rows.append({
                 'Step':        k.replace('GBM: ', ''),
                 'Features':    r['features'],
@@ -1248,9 +1355,9 @@ def main():
                 <div style="font-family:'DM Sans',sans-serif; font-size:14px; color:#E8E8E8; line-height:1.8;">
                     Adding physiological-load features to a rank-only GBM raises test AUC by
                     <strong style="color:#C4622D;">{load_lift:+.4f}</strong>
-                    (from {base_auc:.4f} → {with_load_auc:.4f}). The full feature set lifts AUC by
+                    (from {base_auc:.4f} to {with_load_auc:.4f}). The full feature set lifts AUC by
                     <strong style="color:#4A7C59;">{full_lift:+.4f}</strong> over ranking alone.
-                    {"This supports the review's core hypothesis: scheduling-derived load carries genuine, separable predictive signal beyond ranking." if load_lift > 0 else "In this run, load features did not improve over ranking alone — possibly due to redundancy with rank for high-load top players, or insufficient sample size in load-extreme regions."}
+                    {"This supports the review's core hypothesis: scheduling-derived load carries genuine, separable predictive signal beyond ranking." if load_lift > 0 else "In this run, load features did not improve over ranking alone, possibly due to redundancy with rank for high-load top players, or insufficient sample size in load-extreme regions."}
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -1258,7 +1365,7 @@ def main():
         st.divider()
         st.markdown("""
         **How to read this:** Each step in the ablation pipeline adds one group of features that map to a specific
-        cascade stage from the systematic review. The leftmost bar is a ranking-only sanity check — what you'd get
+        cascade stage from the systematic review. The leftmost bar is a ranking-only sanity check, what you'd get
         from Elo or ATP rank alone. Each subsequent bar adds the engineered features tied to a specific research-paper
         construct (Stage 1 load, Stage 3-5 form, contextual H2H/quality, surface). If a step improves AUC,
         that feature group contains real, non-redundant signal.
@@ -1268,51 +1375,51 @@ def main():
     # TAB 4: KEY FINDINGS
     # ════════════════════════════════════════════════════════════
     with tab4:
-        st.markdown('<div class="section-label">From the Systematic Review · 10 Studies · 847 Records Screened</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-label">From the Systematic Review · Key Findings</div>', unsafe_allow_html=True)
 
         st.markdown("""
         <div style="background: #141414; border: 1px solid #2E2E2E; border-left: 4px solid #C4622D;
                     border-radius: 0 8px 8px 0; padding: 24px 28px; margin-bottom: 28px;">
             <div style="font-family:'DM Mono',monospace; font-size:10px; letter-spacing:3px; color:#C4622D; margin-bottom:12px; text-transform:uppercase;">
-                THE BREAKING POINT — Abstract
+                THE BREAKING POINT - Abstract
             </div>
             <div style="font-family:'DM Sans',sans-serif; font-size:14px; color:#C8C8C8; line-height:1.8;">
-                Peer-reviewed systematic review (NHSJS, 2026) of PubMed, Google Scholar, and SPORTDiscus (2002–2023)
-                following PRISMA 2020 guidelines. Ten studies were synthesized. A distinct dissociation was found between
-                power and precision under fatigue: <strong style="color:#E8E8E8;">serve velocity declined only 0.4–2.8%</strong>,
-                while <strong style="color:#E8E8E8;">serve accuracy degraded 25–41% and groundstroke accuracy up to 69%</strong>.
-                Reaction time delayed 47–68 ms; decision-making quality declined 18–34%.
+                Peer-reviewed systematic review (NHSJS, 2026) of PubMed, Google Scholar, and SPORTDiscus
+                following PRISMA guidelines. A distinct dissociation was found between
+                power and precision under fatigue: <strong style="color:#E8E8E8;">serve velocity declined only 0.4-2.8%</strong>,
+                while <strong style="color:#E8E8E8;">serve accuracy degraded 25-41% and groundstroke accuracy declined up to 69%</strong>.
+                Reaction time delays were 47-68 ms; declines in decision-making quality were described qualitatively.
             </div>
         </div>
         """, unsafe_allow_html=True)
 
-        st.markdown("### The Velocity–Accuracy Paradox")
+        st.markdown("### The Velocity-Accuracy Paradox")
         col_va1, col_va2 = st.columns([3, 2])
         with col_va1:
             st.markdown("""
-            The most counterintuitive finding of the review: **fatigue does not slow players down — it makes them inaccurate.**
+            The most counterintuitive finding of the review: **fatigue does not slow players down, it makes them inaccurate.**
 
-            Across the included primary studies, serve velocity under fatigued conditions fell by less than 2.8% — within
+            Across the included primary studies, serve velocity under fatigued conditions declined 0.4-2.8%, within
             normal match variation and statistically non-significant in most protocols. Yet in the same conditions,
-            serve accuracy dropped 25–41% and groundstroke accuracy collapsed by up to **69%** in high-intensity protocols
-            (Davey et al., 2002).
+            serve accuracy dropped 25-41% and groundstroke accuracy declined by up to **69%** in high-intensity protocols.
 
-            This challenges the traditional definition of fatigue as "reduced force production"
-            (Edwards, 1981). What actually limits elite performance is **neural inefficiency** — degradation
+            This challenges the traditional definition of fatigue as "reduced force production".
+            What actually limits elite performance is **neural inefficiency**, degradation
             of fine motor control while gross power output remains preserved.
             """)
         with col_va2:
             paradox_df = pd.DataFrame({
                 'Metric': ['Serve Velocity', 'Serve Accuracy', 'Groundstroke Accuracy'],
-                'Avg Decline (%)': [1.8, 33.0, 54.0],
+                'Max Reported Decline (%)': [2.8, 41.0, 69.0],
+                'Label': ['0.4-2.8%', '25-41%', 'up to 69%'],
             })
             fig_paradox = go.Figure()
             colors = ['#4A7FC4', '#C4622D', '#A83232']
             for i, row in paradox_df.iterrows():
                 fig_paradox.add_trace(go.Bar(
-                    x=[row['Avg Decline (%)']], y=[row['Metric']], orientation='h',
+                    x=[row['Max Reported Decline (%)']], y=[row['Metric']], orientation='h',
                     marker_color=colors[i], name=row['Metric'],
-                    text=[f"-{row['Avg Decline (%)']:.1f}%"], textposition='outside',
+                    text=[row['Label']], textposition='outside',
                     textfont=dict(family='DM Mono', size=12, color='#E8E8E8')
                 ))
             fig_paradox.update_layout(
@@ -1329,21 +1436,21 @@ def main():
         st.markdown("""
         <div style="font-family:'DM Sans',sans-serif; font-size:14px; color:#C8C8C8; line-height:1.8; margin-bottom:20px;">
         Synthesizing biomechanical and cognitive data across the included studies, the review proposes a hypothesis-generating
-        framework explaining how elite performance degrades under fatigue — not all at once, but in a 5-stage sequence.
+        framework explaining how elite performance degrades under fatigue, not all at once, but in a 5-stage sequence.
         </div>
         """, unsafe_allow_html=True)
 
         stages = [
             ("Stage 1", "Lower-Body Fatigue", "#C4622D",
-             "Metabolic fatigue in the quadriceps and gastrocnemius causes reduced knee flexion (~6° over 3 sets per Fenter et al. 2017) and declining ground reaction force. The earliest measurable signal of cascade onset."),
+             "Metabolic fatigue in the quadriceps and gastrocnemius causes reduced knee flexion (~6 degrees over 3 sets per Fenter et al. 2017) and declining ground reaction force. The earliest measurable signal of cascade onset."),
             ("Stage 2", "Kinetic Chain Compensation", "#B85A28",
-             "The CNS prioritizes force maintenance. Trunk rotation increases to compensate for lost leg drive — preserving ball speed at a structural cost."),
+             "The CNS prioritizes force maintenance. Trunk rotation increases to compensate for lost leg drive, preserving ball speed at a structural cost."),
             ("Stage 3", "Precision Loss", "#A0491E",
-             "Compensatory proximal recruitment destabilizes distal fine motor control. Velocity holds, but placement collapses: serve accuracy −25–41%, groundstrokes up to −69%."),
+             "Compensatory proximal recruitment destabilizes distal fine motor control. Velocity holds, but placement declines: serve accuracy declines 25-41%, groundstroke accuracy declines up to 69%."),
             ("Stage 4", "Range of Motion Restriction", "#8A3A16",
-             "Continued fatigue restricts rotational range of motion, reducing topspin generation. Shots flatten out — a tactical liability even if power is intact."),
+             "Continued fatigue restricts rotational range of motion, reducing topspin generation. Shots flatten out, a tactical liability even if power is intact."),
             ("Stage 5", "Cognitive Failure", "#6E2B0E",
-             "Systemic fatigue impairs executive function: reaction time delays of 47–68 ms, and decision-making quality declines 18–34%."),
+             "Systemic fatigue impairs executive function: reaction time delays of 47-68 ms, with declines in decision-making quality described qualitatively."),
         ]
         for stage_id, stage_name, color, desc in stages:
             st.markdown(f"""
@@ -1381,7 +1488,7 @@ def main():
 
 Traditional ATP forecasting over-weights static rankings and ignores cumulative match-play cost.
 This dashboard operationalizes the *Precision Degradation Cascade* as computable ML features and
-empirically tests — via the Ablation Study tab — whether scheduling-derived load adds predictive
+empirically tests, via the Ablation Study tab, whether scheduling-derived load adds predictive
 signal beyond ranking alone.
 
 **From Paper to Features**
@@ -1392,33 +1499,34 @@ records. Recovery days capture Stage 1–2 restoration. Rolling win rates reflec
 
 **Why Calibrated Gradient Boosting**
 
-GBM builds trees sequentially, correcting residuals — well-suited to non-linear fatigue thresholds
-(the "breaking point" concept). Isotonic calibration ensures probabilities are statistically reliable,
-not just rank-ordered. Verified empirically via reliability diagram and Brier score.
+GBM builds trees sequentially, correcting residuals, which is well-suited to non-linear fatigue thresholds
+(the "breaking point" concept). The pre-match model uses isotonic calibration through
+CalibratedClassifierCV so probabilities are statistically reliable, not just rank-ordered.
+Verified empirically via reliability diagram and Brier score.
             """)
         with col_r:
             st.markdown("""
 **Feature Engineering**
 
-`LOAD (7/14/28d)` — cumulative court minutes in rolling windows
+`LOAD (7/14/28d)` - cumulative court minutes in rolling windows
 
-`SURFACE-WEIGHTED LOAD` — 28d minutes scaled by surface multiplier (clay ×1.27, grass ×0.80)
+`SURFACE-WEIGHTED LOAD` - 28d minutes scaled by surface multiplier (clay ×1.27, grass ×0.80)
 
-`ROUND-WEIGHTED LOAD` — minutes scaled by round intensity (SF ×1.15, F ×1.30)
+`ROUND-WEIGHTED LOAD` - minutes scaled by round intensity (SF ×1.15, F ×1.30)
 
-`H2H RECORD` — head-to-head win rate vs this opponent
+`H2H RECORD` - head-to-head win rate vs this opponent
 
-`OPPONENT QUALITY` — avg rank of players beaten in last 10 wins
+`OPPONENT QUALITY` - avg rank of players beaten in last 10 wins
 
-`RECOVERY` — days since last match; matches in prior 7 days
+`RECOVERY` - days since last match; matches in prior 7 days
 
-`FORM` — rolling win % over last 10 and 20 matches
+`FORM` - rolling win % over last 10 and 20 matches
 
-`SURFACE` — clay / hard / grass / carpet
+`SURFACE` - clay / hard / grass / carpet
 
 **Validation**
 
-- Temporal 80/20 train/test split (no future leakage)
+- Chronological positional hold-out on date-sorted data: first 80% train, last 20% test
 - 5-fold CV on training set (stratified)
 - Three baseline comparisons (Performance tab)
 - 5-step ablation study (Ablation tab)
@@ -1426,7 +1534,7 @@ not just rank-ordered. Verified empirically via reliability diagram and Brier sc
 
 **Data Source**
 
-[JeffSackmann/tennis_atp](https://github.com/JeffSackmann/tennis_atp) — 8 years of ATP match records.
+[JeffSackmann/tennis_atp](https://github.com/JeffSackmann/tennis_atp) - 8 years of ATP match records.
             """)
 
         st.divider()
@@ -1435,14 +1543,14 @@ not just rank-ordered. Verified empirically via reliability diagram and Brier sc
 
 Heterogeneity in how the ATP records match duration mirrors the measurement heterogeneity that
 prevented formal meta-analysis in the systematic review. The model captures scheduling load but
-cannot directly observe Stage 1–3 biomechanical variables (knee flexion, EMG) — these remain latent
+cannot directly observe Stage 1–3 biomechanical variables (knee flexion, EMG), these remain latent
 signals approximated by court time.
 
 **Citation**
 
 *"The Breaking Point: A Systematic Review of Physiological and Cognitive Fatigue Effects on
-Professional Tennis Performance"* — National High School Journal of Science (NHSJS), 2026.
-PRISMA-compliant systematic review (847 records → 10 included). PubMed · Google Scholar · SPORTDiscus.
+Professional Tennis Performance"* - National High School Journal of Science (NHSJS), 2026.
+PRISMA-compliant systematic review. PubMed · Google Scholar · SPORTDiscus.
         """)
 
     # ════════════════════════════════════════════════════════════
@@ -1492,6 +1600,7 @@ PRISMA-compliant systematic review (847 records → 10 included). PubMed · Goog
 
         if run:
             def build_input_dict(p1_d, p2_d, surf_enc):
+                """Align sidebar/player stats with the trained pre-match feature schema."""
                 return {
                     'p1_rank': p1_d['rank'], 'p2_rank': p2_d['rank'],
                     'p1_cum_mins_7d': p1_d['cum_mins_7d'], 'p2_cum_mins_7d': p2_d['cum_mins_7d'],
@@ -1562,7 +1671,7 @@ PRISMA-compliant systematic review (847 records → 10 included). PubMed · Goog
             st.markdown("""
             <div style="font-family:'DM Sans',sans-serif; font-size:13px; color:#A0A0A0; line-height:1.7; margin-bottom:16px;">
                 These simulations isolate the marginal effect of <strong style="color:#E8E8E8;">recovery</strong> and
-                <strong style="color:#E8E8E8;">cumulative load</strong> on the model's prediction — holding everything else fixed.
+                <strong style="color:#E8E8E8;">cumulative load</strong> on the model's prediction, holding everything else fixed.
                 The slope of each curve quantifies how much the model believes that variable matters for this specific matchup.
             </div>
             """, unsafe_allow_html=True)
@@ -1607,7 +1716,7 @@ PRISMA-compliant systematic review (847 records → 10 included). PubMed · Goog
                 <div class="counterfactual-box">
                     Maximum recovery upside for <strong>{name1}</strong>:
                     <strong style="color:#4A7C59;">{max_lift:+.2%}</strong> win probability
-                    over a 0–14 day rest range. This is how much the model believes recovery alone can shift this matchup —
+                    over a 0–14 day rest range. This is how much the model believes recovery alone can shift this matchup,
                     isolating Stage 1 cascade reversal.
                 </div>
                 """, unsafe_allow_html=True)
@@ -1662,19 +1771,23 @@ PRISMA-compliant systematic review (847 records → 10 included). PubMed · Goog
     # TAB 6: IN-MATCH WIN PROBABILITY (Match Charting Project data)
     # ════════════════════════════════════════════════════════════
     with tab6:
-        st.markdown('<div class="section-label">Live-Style Win Probability · Real Point-by-Point Data</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-label">Score-State Win Probability · Real Point-by-Point Data</div>', unsafe_allow_html=True)
 
         st.markdown("""
         <div style="font-family:'DM Sans',sans-serif; font-size:14px; color:#C8C8C8; line-height:1.7; margin-bottom:20px;">
         This model estimates a player's probability of <strong style="color:#E8E8E8;">winning the match</strong> from
-        the current <strong style="color:#E8E8E8;">score state</strong> alone — sets, games, who is serving, and match format.
+        the current <strong style="color:#E8E8E8;">score state</strong> alone: sets, games, who is serving, and match format.
         Unlike the pre-match model, it answers: <em>given where the match stands right now, who is winning?</em>
         Set a scoreline below and watch the probability update.
         </div>
         """, unsafe_allow_html=True)
 
-        with st.spinner("Loading in-match model (first load trains it, ~2 min)..."):
-            inmatch_model, inmatch_metrics = train_inmatch_model()
+        try:
+            with st.spinner("Loading in-match model (first load trains it, ~2 min)..."):
+                inmatch_model, inmatch_metrics = train_inmatch_model()
+        except Exception as e:
+            st.error(f"Could not load Match Charting Project point data: {e}")
+            st.stop()
 
         mc1, mc2, mc3 = st.columns(3)
         mc1.metric("Model AUC", f"{inmatch_metrics['auc']:.3f}")
@@ -1770,10 +1883,10 @@ PRISMA-compliant systematic review (847 records → 10 included). PubMed · Goog
         duplicated with players swapped) to remove the dataset's Player-1 labeling bias, and a
         match-level train/test split to prevent leakage between points of the same match.
 
-        **Honest limitations.** This model uses *score state only* — it does not know player identity,
+        **Honest limitations.** This model uses *score state only*, it does not know player identity,
         ranking, or fatigue, so it cannot tell that a stronger player is more likely to come back. Test
         AUC is ~0.81; commercial in-match models reach higher by incorporating player ratings and
-        live serve/rally data. I tested isotonic calibration but kept the uncalibrated model, which
+        point-level serve/rally data. I tested isotonic calibration but kept the uncalibrated model, which
         scored better on Brier and log-loss for this dataset.
 
         **Data:** Jeff Sackmann's [Match Charting Project](https://github.com/JeffSackmann/tennis_MatchChartingProject),

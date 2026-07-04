@@ -2,22 +2,54 @@
 Chunk 4A: Check and fix calibration of the in-match model.
 A reliability diagram tells us whether predicted probabilities match reality.
 """
+import io
+import socket
+import urllib.error
+import urllib.request
+
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from sklearn.metrics import roc_auc_score, brier_score_loss, log_loss
 
-URL = "https://raw.githubusercontent.com/JeffSackmann/tennis_MatchChartingProject/master/charting-m-points-2020s.csv"
+URL = "https://raw.githubusercontent.com/JeffSackmann/tennis_MatchChartingProject/refs/heads/master/charting-m-points-2020s.csv"
 BO5_TOURNEYS = ['Australian_Open', 'Roland_Garros', 'Wimbledon', 'US_Open']
 
+def read_remote_csv(url: str, label: str, timeout: int = 20) -> pd.DataFrame:
+    """Download a remote CSV with timeout, HTTP, and empty-response handling."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            payload = response.read()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"{label} returned HTTP {e.code}.") from e
+    except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
+        raise RuntimeError(f"{label} request failed or timed out.") from e
+
+    if not payload:
+        raise RuntimeError(f"{label} returned an empty response.")
+
+    try:
+        df = pd.read_csv(io.BytesIO(payload), low_memory=False)
+    except pd.errors.EmptyDataError as e:
+        raise RuntimeError(f"{label} returned an empty CSV.") from e
+
+    if df.empty:
+        raise RuntimeError(f"{label} did not contain any rows.")
+    return df
+
+
 def infer_best_of_5(match_id):
+    """Infer best-of-5 format from Grand Slam match IDs."""
     if not isinstance(match_id, str):
         return 0
     return int(any(t in match_id for t in BO5_TOURNEYS))
 
 print("Downloading data...")
-df = pd.read_csv(URL, low_memory=False)
+try:
+    df = read_remote_csv(URL, "Match Charting Project point data")
+except RuntimeError as e:
+    raise SystemExit(f"Could not load point data: {e}") from e
 
 # --- Match winners ---
 last_points = df.groupby('match_id').tail(1).copy()

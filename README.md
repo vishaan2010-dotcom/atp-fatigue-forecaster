@@ -1,110 +1,103 @@
 # ATP Fatigue Forecaster
-### An Interactive ML Dashboard for Physiological Load Modeling in Professional Tennis
 
-> **Live Demo →** https://atp-fatigue-forecaster-amgk86xppbhgdmajt5txdm.streamlit.app/
+An interactive Streamlit ML app for studying physiological load, fatigue, and match-outcome forecasting in professional men's tennis.
 
-Built as a direct computational extension of my systematic review:
-*"The Breaking Point: A Systematic Review of Physiological and Cognitive Fatigue Effects on Professional Tennis Performance"* (2025)
+[Live demo](https://atp-fatigue-forecaster-amgk86xppbhgdmajt5txdm.streamlit.app/)
 
----
+This project extends my published systematic review, ["The Breaking Point: A Systematic Review of Physiological and Cognitive Fatigue Effects on Professional Tennis Performance"](https://nhsjs.com/), published in the National High School Journal of Science in 2026.
 
-## The Research Question
+## Research Motivation
 
-Traditional ATP forecasting relies almost entirely on static ranking systems like Elo. But rankings don't know if a player spent 800 minutes on court in the last two weeks. They don't know if he played five matches in eight days and flew across time zones between them.
+Traditional tennis forecasting leans heavily on rankings and rating systems. Those signals are useful, but they do not directly represent recent court time, short rest, tournament load, or surface-specific physical demand.
 
-This project tests a simple hypothesis: **physiological load accumulation — computed from real match scheduling data — adds meaningful predictive signal beyond ranking alone.**
+The ATP Fatigue Forecaster tests whether scheduling-derived load features add predictive information beyond ranking alone. The app operationalizes fatigue concepts from the review as pre-match features, then compares models and ablations on held-out historical ATP match data.
 
----
+## Research Findings Used In The App
 
-## The Precision Degradation Cascade
+The app only uses the following quantitative findings from the paper:
 
-The systematic review (PRISMA guidelines, 847 records screened, 10 studies included) identified a consistent 5-stage sequence of performance breakdown in elite tennis players under fatigue:
+| Finding | Reported value |
+|---|---:|
+| Serve velocity decline under fatigue | 0.4-2.8% |
+| Serve accuracy decline | 25-41% |
+| Groundstroke accuracy decline | up to 69% |
+| Knee flexion reduction | ~6 degrees over 3 sets, Fenter et al. 2017 |
+| Reaction time delay | 47-68 ms |
+| Decision-making | qualitative declines, no percentage |
 
-| Stage | Name | Key Finding |
-|-------|------|-------------|
-| 1 | Lower-Body Fatigue | Knee flexion reduces 15–23°; ground reaction force drops |
-| 2 | Kinetic Chain Compensation | Trunk rotation increases 8–12% to preserve ball speed |
-| 3 | Precision Loss | Serve accuracy −25–32%; groundstroke accuracy up to −69% |
-| 4 | Range of Motion Restriction | Hip rotation ROM −13°; shots flatten and land long |
-| 5 | Cognitive Failure | Reaction time +47–68 ms; decision-making quality −18–34% |
+These findings motivate the Precision Degradation Cascade shown in the app: fatigue has a larger effect on precision, movement quality, and cognition than on raw serve speed.
 
-The counterintuitive core finding: **serve velocity declined only 0.4–3.1%** while accuracy collapsed. Fatigue doesn't slow players down — it makes them imprecise. The model's features are designed to operationalize Stage 1 load accumulation as an early warning signal for downstream cascade effects.
+## Models
 
----
+The app contains two separate models.
 
-## Features
+**Pre-match fatigue model**
 
-- **Player Lookup Mode** — select any ATP player by name and auto-populate their real rolling stats from historical records
-- **Real Rolling Features** — cumulative court minutes in 7/14/28-day windows, rest days, rolling win rates, tournament load — all computed from actual ATP scheduling data, no synthetic proxies
-- **Calibrated Gradient Boosting** — isotonic regression calibration ensures probability outputs are statistically reliable
-- **Cascade-Linked Commentary** — inference output explicitly maps predictions back to the 5-stage research model
-- **Key Findings Tab** — interactive visualization of the systematic review's core results
-- **Reliability Diagram** — model calibration chart to verify probability accuracy
+This is the main ATP Fatigue Forecaster model. It predicts match outcome from ranking, rolling court-time load, rest, tournament load, recent form, head-to-head history, opponent quality, and surface. It uses a Gradient Boosting classifier with isotonic probability calibration through `CalibratedClassifierCV`.
 
----
+Validation uses a chronological positional hold-out on date-sorted data: the first training portion is fit, and the last held-out portion is evaluated. This is intentionally described as a positional hold-out, not as a full production backtest with tournament-level embargoing.
 
-## How It Works
+**In-match score-state model**
 
-```
-Raw ATP Match Data (JeffSackmann/tennis_atp)
-        │
-        ▼
-Rolling Feature Engineering
-  ├── Cumulative court minutes (7d / 14d / 28d windows)
-  ├── Days since last match
-  ├── Matches played in prior 7 days
-  ├── Rolling win % (last 10 and 20 matches)
-  └── Tournament-level load (matches + minutes in current draw)
-        │
-        ▼
-Calibrated Gradient Boosting Classifier
-  ├── 300 estimators, learning rate 0.05, max depth 4
-  ├── Isotonic regression probability calibration (CalibratedClassifierCV)
-  └── Temporal train/test split — train on older seasons, test on newer ones
-        │
-        ▼
-Match Outcome Probability + Cascade Stage Analysis
-```
+This secondary model estimates match win probability from score state only: sets, games, server, point number, match format, tiebreak status, and decisive-set state. It uses point-by-point data from the Match Charting Project. It is intentionally uncalibrated because isotonic calibration was tested and kept out after worse Brier and log-loss performance on this dataset.
 
-**Critical design decision:** Features are computed using only data available *before* each match. The history is updated *after* features are extracted, preventing any lookahead bias.
+## Ablation Study
 
----
+The Ablation Study tab tests the central research question directly. It trains comparable Gradient Boosting models with progressively richer feature groups:
 
-## Data Source
+- Ranking only
+- Ranking plus physiological load
+- Load plus recent form
+- Head-to-head and opponent quality
+- Full feature set
 
-[JeffSackmann/tennis_atp](https://github.com/JeffSackmann/tennis_atp) — the most comprehensive public ATP match-level dataset available, covering match results, rankings, scores, and match duration from 1968 to present. This project fetches the 4 most recent available years dynamically at runtime.
+The key comparison is ranking-only versus ranking plus physiological load. The app reports the AUC lift dynamically from the current fetched dataset, showing whether scheduling-derived load contributes separable predictive signal beyond rank.
 
----
+## Data Sources
 
-## Running Locally
+- [Jeff Sackmann tennis_atp](https://github.com/JeffSackmann/tennis_atp): canonical ATP match results, rankings, dates, surfaces, scores, and durations. The loader also tries same-schema public mirrors if the canonical raw files are temporarily unreachable.
+- [Jeff Sackmann Match Charting Project](https://github.com/JeffSackmann/tennis_MatchChartingProject): point-by-point charting data for the in-match score-state model.
+
+The app fetches public CSV files at runtime and caches them with Streamlit. Network failures, empty responses, and HTTP errors are handled with user-facing messages.
+
+## Honest Limitations
+
+- Public ATP data does not include direct biomechanical measurements such as knee flexion or EMG, so physiological load is approximated from match duration and scheduling history.
+- Match duration is an imperfect proxy for physical and cognitive fatigue because it cannot capture heat, travel, illness, playing style, or rally intensity.
+- The pre-match split is a chronological positional hold-out on date-sorted data, not a full production backtest with tournament-level embargoing.
+- The in-match model does not know player identity, ranking, fatigue, serve quality, rally length, or point-tracking data.
+- The app is for academic and research use only. It is not intended for betting or wagering.
+
+## Local Setup
 
 ```bash
 git clone https://github.com/vishaan2010-dotcom/atp-fatigue-forecaster
 cd atp-fatigue-forecaster
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
-streamlit run app.py
+streamlit run src/app.py
+```
 
+On macOS or Linux, activate the environment with:
 
-Requires Python 3.9+. First run will take 2–3 minutes to fetch data and train the model; subsequent runs use Streamlit's cache.
+```bash
+source .venv/bin/activate
+```
 
----
+The first run fetches public CSV data and trains the cached models. Later runs are faster because Streamlit reuses cached data and model objects.
 
-## Research Foundation
+## Project Structure
 
-**Title:** The Breaking Point: A Systematic Review of Physiological and Cognitive Fatigue Effects on Professional Tennis Performance
+```text
+src/app.py                  Streamlit app and model pipeline
+src/test_app.py             Data-loading and feature-engineering tests
+src/train_inmatch.py        Standalone in-match model training script
+src/calibrate_inmatch.py    Calibration comparison script for the in-match model
+src/explore_pbp.py          Match Charting Project data exploration helper
+requirements.txt            Minimal Streamlit Community Cloud dependencies
+```
 
-**Methods:** PRISMA-compliant systematic review. Boolean search across PubMed, Google Scholar, and SPORTDiscus (January 2002 – December 2023). 847 records screened → 10 studies meeting inclusion criteria (elite/sub-elite populations, validated fatigue protocols, quantitative outcome measures).
+## License
 
-**Key Sources:** Davey et al. (2002), Hornery et al. (2007), Girard et al. (2008), Lyons et al. (2013), Reid & Duffield (2014), Bilić et al. (2023)
-
----
-
-## Limitations
-
-- Match duration (minutes) is the best available proxy for physiological load in public ATP data. Direct biomechanical measurements (knee flexion, EMG) are not publicly recorded at scale.
-- The model captures scheduling load but cannot directly observe Stage 1–3 cascade variables. These remain latent signals approximated by court time accumulation.
-- Heterogeneity in match conditions (altitude, heat, indoor vs. outdoor) is not controlled for, mirroring the measurement heterogeneity that prevented formal meta-analysis in the systematic review.
-
----
-
-*This project is for academic and research purposes only.*
+This project is released for academic and research purposes under the repository license.

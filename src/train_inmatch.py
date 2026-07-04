@@ -1,23 +1,55 @@
 """
 Chunk 3 (v2): Score-state features + GBM vs logistic comparison.
-Fixes: TbSet column wasn't 0/1 — derive tiebreak from score (6-6).
+Fixes: TbSet column was not 0/1, derive tiebreak from score (6-6).
 """
+import io
+import socket
+import urllib.error
+import urllib.request
+
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import roc_auc_score, brier_score_loss, log_loss
 
-URL = "https://raw.githubusercontent.com/JeffSackmann/tennis_MatchChartingProject/master/charting-m-points-2020s.csv"
+URL = "https://raw.githubusercontent.com/JeffSackmann/tennis_MatchChartingProject/refs/heads/master/charting-m-points-2020s.csv"
 BO5_TOURNEYS = ['Australian_Open', 'Roland_Garros', 'Wimbledon', 'US_Open']
 
+def read_remote_csv(url: str, label: str, timeout: int = 20) -> pd.DataFrame:
+    """Download a remote CSV with timeout, HTTP, and empty-response handling."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            payload = response.read()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"{label} returned HTTP {e.code}.") from e
+    except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
+        raise RuntimeError(f"{label} request failed or timed out.") from e
+
+    if not payload:
+        raise RuntimeError(f"{label} returned an empty response.")
+
+    try:
+        df = pd.read_csv(io.BytesIO(payload), low_memory=False)
+    except pd.errors.EmptyDataError as e:
+        raise RuntimeError(f"{label} returned an empty CSV.") from e
+
+    if df.empty:
+        raise RuntimeError(f"{label} did not contain any rows.")
+    return df
+
+
 def infer_best_of_5(match_id: str) -> int:
+    """Infer best-of-5 format from Grand Slam match IDs."""
     if not isinstance(match_id, str):
         return 0
     return int(any(t in match_id for t in BO5_TOURNEYS))
 
 print("Downloading data...")
-df = pd.read_csv(URL, low_memory=False)
+try:
+    df = read_remote_csv(URL, "Match Charting Project point data")
+except RuntimeError as e:
+    raise SystemExit(f"Could not load point data: {e}") from e
 print(f"Loaded {len(df):,} points from {df['match_id'].nunique():,} matches.")
 
 # ─────────────────────────────────────────────
