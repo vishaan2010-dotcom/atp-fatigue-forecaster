@@ -5,6 +5,7 @@ An interactive Streamlit ML app for studying physiological load, fatigue, and ma
 [Live demo](https://atp-fatigue-forecaster-amgk86xppbhgdmajt5txdm.streamlit.app/)
 
 This project extends my published systematic review, ["The Breaking Point: A Systematic Review of Physiological and Cognitive Fatigue Effects on Professional Tennis Performance"](https://nhsjs.com/), published in the National High School Journal of Science in 2026.
+DOI: https://doi.org/10.5281/zenodo.21271049
 
 ## Research Motivation
 
