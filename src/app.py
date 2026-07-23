@@ -345,12 +345,18 @@ def engineer_features(df_raw: pd.DataFrame) -> pd.DataFrame:
     """Create pre-match rolling load, form, H2H, quality, and surface features."""
     from collections import defaultdict
     required_cols = ['tourney_date', 'winner_id', 'loser_id', 'winner_rank', 'loser_rank',
-                     'minutes', 'surface', 'tourney_id', 'round']
+                     'minutes', 'surface', 'tourney_id', 'round', 'match_num']
     # Work only from complete rows needed for the deployed feature set.
     df = df_raw.dropna(subset=required_cols).copy()
     df['match_date'] = pd.to_datetime(df['tourney_date'], format='%Y%m%d', errors='coerce')
-    # Sorting by date is what makes the downstream positional hold-out chronological.
-    df = df.dropna(subset=['match_date']).sort_values('match_date').reset_index(drop=True)
+    df = df.dropna(subset=['match_date'])
+
+    # tourney_date is the tournament START date, so every match in a tournament shares it.
+    # Sorting on date alone leaves thousands of ties, and the default quicksort is unstable,
+    # which can place a final before a first-round match of the same event. That lets later
+    # rounds leak into a player's "prior history" and inflates the load features.
+    # match_num gives true within-tournament order; mergesort is stable so ties never scramble.
+    df = df.sort_values(['match_date', 'match_num'], kind='mergesort').reset_index(drop=True)
 
     round_order = {'R128': 1, 'R64': 2, 'R32': 3, 'R16': 4, 'QF': 5, 'SF': 6, 'F': 7, 'RR': 3}
     df['round_num'] = df['round'].map(round_order).fillna(3)
@@ -458,8 +464,18 @@ def engineer_features(df_raw: pd.DataFrame) -> pd.DataFrame:
         h2h_history[(w_id, l_id)].append(1)
         h2h_history[(l_id, w_id)].append(0)
 
-    return pd.DataFrame(rows).dropna()
+    out = pd.DataFrame(rows).dropna()
 
+    # ── LEAKAGE DIAGNOSTIC ──────────────────────────────────────
+    # If features are clean, winners and losers should look nearly identical here.
+    # A large gap means the feature encodes the outcome rather than pre-match state.
+    logging.info("LEAK CHECK — mean by outcome (0 = p1 lost, 1 = p1 won):")
+    for col in ['p1_tourney_matches_before', 'p1_cum_mins_7d', 'p1_days_since_last']:
+        means = out.groupby('p1_wins')[col].mean()
+        logging.info(f"  {col}: lost={means.get(0, float('nan')):.2f}  won={means.get(1, float('nan')):.2f}")
+    # ────────────────────────────────────────────────────────────
+
+    return out
 
 # ─────────────────────────────────────────────
 # IN-MATCH WIN PROBABILITY MODEL
