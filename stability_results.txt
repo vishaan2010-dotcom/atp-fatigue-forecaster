@@ -1,24 +1,5 @@
-2026-10-11 14:28:12.470 WARNING streamlit.runtime.scriptrunner_utils.script_run_context: Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
-2026-10-11 14:28:12.470 WARNING streamlit.runtime.scriptrunner_utils.script_run_context: Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
-2026-10-11 14:28:13.010 
-  [33m[1mWarning:[0m to view this Streamlit app on a browser, run it with the following
-  command:
-
-    streamlit run src/stability_test.py [ARGUMENTS]
-2026-10-11 14:28:13.010 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
-2026-10-11 14:28:13.010 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
-2026-10-11 14:28:13.010 No runtime found, using MemoryCacheStorageManager
-2026-10-11 14:28:13.010 No runtime found, using MemoryCacheStorageManager
-2026-10-11 14:28:13.026 No runtime found, using MemoryCacheStorageManager
-Fetching 8 seasons through app.load_raw_data() ...
-2026-10-11 14:28:13.035 No runtime found, using MemoryCacheStorageManager
-2026-10-11 14:28:13,332 - WARNING - 2026 not yet published, skipping.
-2026-10-11 14:28:13,493 - WARNING - 2025 not yet published, skipping.
-2026-10-11 14:28:16.641 No runtime found, using MemoryCacheStorageManager
-2026-10-11 14:28:23,377 - INFO - LEAK CHECK — mean by outcome (0 = p1 lost, 1 = p1 won):
-2026-10-11 14:28:23,377 - INFO -   p1_tourney_matches_before: lost=0.84  won=0.80
-2026-10-11 14:28:23,377 - INFO -   p1_cum_mins_7d: lost=174.92  won=180.81
-2026-10-11 14:28:23,377 - INFO -   p1_days_since_last: lost=24.70  won=17.32
+Command: python -u src/stability_test.py --seeds 20 --boot 2000
+Run: 2026-10-11, match data from vishaan2010-dotcom/tennis_atp at commit 6b9482f (pinned in src/app.py)
 
 Matches: 17685   train: 14148   test: 3537
 Seeds: 20 (+ reference seed 42)   bootstrap: 2000

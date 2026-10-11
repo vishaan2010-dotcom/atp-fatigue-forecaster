@@ -1053,7 +1053,7 @@ def main():
                 📄 &nbsp;<span style="color:#C4622D;">"The Breaking Point"</span> - NHSJS, 2026
             </div>
             <div style="font-family: 'DM Mono', monospace; font-size: 11px; color: #7A7A7A;">
-                📊 &nbsp;Data: JeffSackmann/tennis_atp (8-year ATP match records) + Match Charting Project
+                📊 &nbsp;Data: Jeff Sackmann's tennis_atp, read from a pinned fork since upstream is no longer reachable (8-year ATP match records) + Match Charting Project
             </div>
             <div style="font-family: 'DM Mono', monospace; font-size: 11px; color: #7A7A7A;">
                 🧠 &nbsp;Model: Calibrated Gradient Boosting · PRISMA-guided feature design
@@ -1547,7 +1547,9 @@ Verified empirically via reliability diagram and Brier score.
 
 **Data Source**
 
-[JeffSackmann/tennis_atp](https://github.com/JeffSackmann/tennis_atp) - 8 years of ATP match records.
+Jeff Sackmann's tennis_atp dataset - 8 years of ATP match records. The upstream JeffSackmann/tennis_atp repository
+is no longer reachable, so the app reads from a
+[fork pinned at commit 6b9482f](https://github.com/vishaan2010-dotcom/tennis_atp/tree/6b9482f815bb930cfbffd38ddeac6225ea132bb3).
             """)
 
         st.divider()

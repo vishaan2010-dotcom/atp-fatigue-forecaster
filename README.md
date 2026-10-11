@@ -92,7 +92,7 @@ never run:
 | Comparison | Delta AUC | 95% CI | Verdict |
 |---|---|---|---|
 | Load vs ranking | +0.0073 | [+0.0008, +0.0136] | excludes zero |
-| Form vs load | +0.0057 | [+0.0015, +0.0099] | excludes zero |
+| Form vs load | +0.0057 | [+0.0015, +0.0099] | excludes zero (seed-averaged only) |
 | H2H + quality vs form | +0.0003 | [-0.0024, +0.0031] | crosses zero |
 | Full vs H2H + quality | +0.0000 | [-0.0004, +0.0005] | crosses zero |
 | Full vs ranking | +0.0132 | [+0.0051, +0.0209] | excludes zero |
@@ -123,7 +123,7 @@ assumed rather than established.
 
 ## Data Sources
 
-- **Jeff Sackmann tennis_atp:** canonical ATP match results, rankings, dates, surfaces, scores, and durations. The loader also tries same-schema public mirrors if the canonical raw files are temporarily unreachable.
+- **Jeff Sackmann tennis_atp:** canonical ATP match results, rankings, dates, surfaces, scores, and durations. Match data is read from a single pinned source: a fork of JeffSackmann/tennis_atp at commit 6b9482f, covering 2018 to 2024. The upstream repository no longer resolves and the previous third-party mirror fallbacks were removed, because silently substituting an unverified source was itself the defect. If the pinned source becomes unavailable the app loads no match data rather than quietly training on something else.
 - **Jeff Sackmann Match Charting Project:** point-by-point charting data for the in-match score-state model.
 
 The app fetches public CSV files at runtime and caches them with Streamlit. Network failures, empty responses, and HTTP errors are handled with user-facing messages.
