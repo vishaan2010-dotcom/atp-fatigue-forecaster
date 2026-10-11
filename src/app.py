@@ -37,12 +37,9 @@ warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 ATP_MATCH_URL_TEMPLATES = [
-    # Canonical Jeff Sackmann source. Try both URL styles because GitHub has used both.
-    "https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_matches_{year}.csv",
-    "https://raw.githubusercontent.com/JeffSackmann/tennis_atp/refs/heads/master/atp_matches_{year}.csv",
-    # Same-schema public mirrors used only when the canonical repository is temporarily unavailable.
-    "https://raw.githubusercontent.com/YoavWeller/Tennis_Analysis/main/full_matches_data/atp_matches_{year}.csv",
-    "https://raw.githubusercontent.com/wlucilus/Data-Analysis-ATP-2024/main/atp_matches_{year}.csv",
+    # Upstream JeffSackmann/tennis_atp no longer resolves. Data is read from a
+    # fork pinned to one commit so every run trains on identical input.
+    "https://raw.githubusercontent.com/vishaan2010-dotcom/tennis_atp/6b9482f815bb930cfbffd38ddeac6225ea132bb3/atp_matches_{year}.csv",
 ]
 
 # ─────────────────────────────────────────────

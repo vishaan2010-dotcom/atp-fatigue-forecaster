@@ -109,11 +109,19 @@ def main():
     ap.add_argument("--seeds", type=int, default=20)
     ap.add_argument("--boot", type=int, default=2000)
     ap.add_argument("--ref-seed", type=int, default=42,
-                    help="Seed whose predictions feed the bootstrap (42 = the app's seed).")
+                    help="Seed for the single-seed sensitivity check (42 = the app's seed).")
+    ap.add_argument("--data-seed", type=int, default=42,
+                    help="Seeds the P1/P2 label randomization in engineer_features.")
     ap.add_argument("--jobs", type=int, default=-1)
     args = ap.parse_args()
 
     t0 = time.time()
+    # engineer_features assigns P1/P2 with an unseeded np.random.rand() call, so the
+    # dataset itself differs between runs unless the global numpy seed is fixed first.
+    # app.py does this in its __main__ block; the script must do the same or the whole
+    # ablation table shifts from run to run. Observed drift between two unseeded runs
+    # on identical input was up to 0.0022 AUC, the same order as the effect being measured.
+    np.random.seed(args.data_seed)
     df = load_features(args.data_dir, args.years)
     feature_cols = [c for c in df.columns if c != "p1_wins"]
     y = df["p1_wins"].values
@@ -131,8 +139,9 @@ def main():
     print(f"\nMatches: {len(df)}   train: {split}   test: {len(df) - split}")
     print(f"Seeds: {args.seeds} (+ reference seed {args.ref_seed})   bootstrap: {args.boot}\n")
 
-    auc = {}       # tier -> array of AUC, one per seed in `seeds` order
-    ref_prob = {}  # tier -> test probabilities at the reference seed
+    auc = {}        # tier -> array of AUC, one per seed in `seeds` order
+    ref_prob = {}   # tier -> test probabilities at the reference seed
+    mean_prob = {}  # tier -> test probabilities averaged over all seeds
 
     for name, cols in tiers:
         cols_present = [c for c in cols if c in df.columns]
@@ -143,32 +152,58 @@ def main():
         )
         auc[name] = np.array([roc_auc_score(y_test, p) for p in probs])
         ref_prob[name] = probs[seeds.index(args.ref_seed)]
+        # Averaging the per-seed probabilities removes model-fit randomness, so the
+        # bootstrap below measures sampling uncertainty rather than the luck of one
+        # seed. Anchoring a confidence interval to a single arbitrary seed can flip
+        # a verdict when that seed's delta sits away from the seed mean.
+        mean_prob[name] = np.mean(probs, axis=0)
         print(f"{name:24s} {len(cols_present):3d} feat   "
               f"AUC {auc[name].mean():.4f} +/- {auc[name].std(ddof=1):.4f}   "
               f"[min {auc[name].min():.4f}, max {auc[name].max():.4f}]")
 
-    base = "Ranking only"
-    comparisons = [("+ Physiological Load", "load features vs ranking alone"),
-                   ("Full (all features)", "all features vs ranking alone")]
+    names = [n for n, _ in tiers]
 
-    print("\nPaired per-seed deltas (same seed, same split, tier vs ranking only)")
-    for tier, label in comparisons:
-        d = auc[tier] - auc[base]
-        print(f"  {label:34s} mean {d.mean():+.4f} +/- {d.std(ddof=1):.4f}   "
+    # Every adjacent step is tested, so a tier is never called noise on the
+    # strength of a comparison that was not actually run. The two cumulative
+    # comparisons against ranking alone are kept for the headline claim.
+    candidates = [(names[i], names[i + 1], f"{names[i + 1]} vs {names[i]}")
+                  for i in range(len(names) - 1)]
+    candidates += [
+        (names[0], "+ Physiological Load", "load features vs ranking alone"),
+        (names[0], "Full (all features)", "all features vs ranking alone"),
+    ]
+    # Load vs ranking is also the first adjacent pair. Deduplicate by tier pair so
+    # each distinct comparison is bootstrapped exactly once, on one set of resamples.
+    comparisons, seen = [], set()
+    for lo_tier, hi_tier, label in candidates:
+        if (lo_tier, hi_tier) not in seen:
+            seen.add((lo_tier, hi_tier))
+            comparisons.append((lo_tier, hi_tier, label))
+
+    print("\nPaired per-seed deltas (same seed, same split)")
+    for lo_tier, hi_tier, label in comparisons:
+        d = auc[hi_tier] - auc[lo_tier]
+        print(f"  {label:42s} mean {d.mean():+.4f} +/- {d.std(ddof=1):.4f}   "
               f"positive in {int((d > 0).sum())}/{len(d)} seeds")
 
-    rng = np.random.default_rng(0)
-    print(f"\nPaired bootstrap on the test set, seed {args.ref_seed} predictions")
-    for tier, label in comparisons:
-        m, lo, hi, p_pos, kept = paired_bootstrap(
-            y_test, ref_prob[base], ref_prob[tier], args.boot, rng)
-        crosses = lo < 0 < hi
-        verdict = ("CROSSES ZERO: not distinguishable from zero on this hold-out"
-                   if crosses else "Does not cross zero on this hold-out")
-        print(f"  {label}")
-        print(f"    delta AUC {m:+.4f}   95% CI [{lo:+.4f}, {hi:+.4f}]   "
-              f"P(delta > 0) = {p_pos:.3f}   resamples kept {kept}")
-        print(f"    {verdict}")
+    for source, probs, header in (
+        ("seed-averaged", mean_prob,
+         "Paired bootstrap, predictions averaged over all seeds (primary)"),
+        ("single-seed", ref_prob,
+         f"Paired bootstrap, seed {args.ref_seed} only (sensitivity check)"),
+    ):
+        rng = np.random.default_rng(0)   # same resamples for both, so they are comparable
+        print(f"\n{header}")
+        for lo_tier, hi_tier, label in comparisons:
+            m, lo, hi, p_pos, kept = paired_bootstrap(
+                y_test, probs[lo_tier], probs[hi_tier], args.boot, rng)
+            crosses = lo < 0 < hi
+            verdict = ("CROSSES ZERO: not distinguishable from zero on this hold-out"
+                       if crosses else "Does not cross zero on this hold-out")
+            print(f"  {label}")
+            print(f"    delta AUC {m:+.4f}   95% CI [{lo:+.4f}, {hi:+.4f}]   "
+                  f"P(delta > 0) = {p_pos:.3f}   resamples kept {kept}")
+            print(f"    {verdict}")
 
     print(f"\nElapsed {time.time() - t0:.0f}s")
 

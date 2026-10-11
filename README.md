@@ -63,7 +63,63 @@ The Ablation Study tab tests the central research question directly. It trains c
 
 The key comparison is ranking-only versus ranking plus physiological load. The app reports the AUC lift dynamically from the current fetched dataset, showing whether scheduling-derived load contributes separable predictive signal beyond rank.
 
-On a representative run, ranking-only AUC is 0.678. Adding physiological-load features raises it to 0.687 (+0.009), and the full feature set reaches 0.693, a total lift of +0.015 over ranking alone. This indicates that scheduling-derived load carries a small but separable predictive signal beyond rank, while ranking remains the dominant predictor. AUC values shift slightly between runs because the P1/P2 labels are randomized.
+### Ablation and Significance
+
+The research hypothesis is that accumulated physiological load adds predictive
+signal beyond static ranking. A single-run AUC cannot test that, because the
+gradient booster subsamples on every fit. `src/stability_test.py` repeats each
+feature tier across 21 model seeds on an identical chronological hold-out, then
+runs a 2,000-sample paired bootstrap over the test matches. Predictions are
+averaged across seeds before bootstrapping, so the interval reflects sampling
+uncertainty rather than the luck of one seed, and the single-seed result is
+printed alongside as a sensitivity check. The P1/P2 label randomisation in
+`engineer_features` is explicitly seeded; without that the dataset itself differs
+between runs and the entire table shifts.
+
+Data seed 42, 17,685 matches, 14,148 train / 3,537 test.
+
+| Tier | Features | Test AUC |
+|---|---|---|
+| Ranking only | 2 | 0.6809 +/- 0.0007 |
+| + Physiological load | 20 | 0.6873 +/- 0.0012 |
+| + Form | 24 | 0.6930 +/- 0.0011 |
+| + H2H + opponent quality | 28 | 0.6932 +/- 0.0012 |
+| Full | 29 | 0.6932 +/- 0.0012 |
+
+Every adjacent step is tested, so no tier is dismissed on a comparison that was
+never run:
+
+| Comparison | Delta AUC | 95% CI | Verdict |
+|---|---|---|---|
+| Load vs ranking | +0.0073 | [+0.0008, +0.0136] | excludes zero |
+| Form vs load | +0.0057 | [+0.0015, +0.0099] | excludes zero |
+| H2H + quality vs form | +0.0003 | [-0.0024, +0.0031] | crosses zero |
+| Full vs H2H + quality | +0.0000 | [-0.0004, +0.0005] | crosses zero |
+| Full vs ranking | +0.0132 | [+0.0051, +0.0209] | excludes zero |
+
+**The hypothesis is supported.** Physiological load improves AUC over ranking
+alone, positive in 21 of 21 seeds, and the confidence interval excluded zero in
+all four analyses run during development: two datasets, each under the
+seed-averaged and single-seed bootstrap. The effect is small. The interval's
+lower bound sits just above zero, so the data is consistent with load being worth
+a very small fraction of a percentage point of AUC. It is detectable, not
+substantial.
+
+Recent form is positive in every seed but was distinguishable from zero in only
+one of those four analyses, so it is not reported as an established effect.
+Head-to-head record, opponent quality and surface could not be distinguished from
+zero in any of them.
+
+Reproducibility: the pinned data source and fixed seeds make the pipeline
+deterministic on a given machine. Figures may still differ in the fourth decimal
+across machines because of library versions, so the tier ordering and the
+zero-crossing verdicts are the findings, not the individual digits.
+
+Data provenance: the upstream `JeffSackmann/tennis_atp` repository no longer
+resolves. Match data for 2018 to 2024 is read from a fork of it pinned at commit
+`6b9482f`. That fork has not been independently verified against any other copy
+of the original dataset, so the data's fidelity to Sackmann's released files is
+assumed rather than established.
 
 ## Data Sources
 

@@ -1,0 +1,73 @@
+2026-10-11 14:28:12.470 WARNING streamlit.runtime.scriptrunner_utils.script_run_context: Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-10-11 14:28:12.470 WARNING streamlit.runtime.scriptrunner_utils.script_run_context: Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-10-11 14:28:13.010 
+  [33m[1mWarning:[0m to view this Streamlit app on a browser, run it with the following
+  command:
+
+    streamlit run src/stability_test.py [ARGUMENTS]
+2026-10-11 14:28:13.010 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-10-11 14:28:13.010 Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-10-11 14:28:13.010 No runtime found, using MemoryCacheStorageManager
+2026-10-11 14:28:13.010 No runtime found, using MemoryCacheStorageManager
+2026-10-11 14:28:13.026 No runtime found, using MemoryCacheStorageManager
+Fetching 8 seasons through app.load_raw_data() ...
+2026-10-11 14:28:13.035 No runtime found, using MemoryCacheStorageManager
+2026-10-11 14:28:13,332 - WARNING - 2026 not yet published, skipping.
+2026-10-11 14:28:13,493 - WARNING - 2025 not yet published, skipping.
+2026-10-11 14:28:16.641 No runtime found, using MemoryCacheStorageManager
+2026-10-11 14:28:23,377 - INFO - LEAK CHECK — mean by outcome (0 = p1 lost, 1 = p1 won):
+2026-10-11 14:28:23,377 - INFO -   p1_tourney_matches_before: lost=0.84  won=0.80
+2026-10-11 14:28:23,377 - INFO -   p1_cum_mins_7d: lost=174.92  won=180.81
+2026-10-11 14:28:23,377 - INFO -   p1_days_since_last: lost=24.70  won=17.32
+
+Matches: 17685   train: 14148   test: 3537
+Seeds: 20 (+ reference seed 42)   bootstrap: 2000
+
+Ranking only               2 feat   AUC 0.6809 +/- 0.0007   [min 0.6799, max 0.6827]
++ Physiological Load      20 feat   AUC 0.6873 +/- 0.0012   [min 0.6844, max 0.6894]
++ Form                    24 feat   AUC 0.6930 +/- 0.0011   [min 0.6898, max 0.6948]
++ H2H + Quality           28 feat   AUC 0.6932 +/- 0.0012   [min 0.6913, max 0.6963]
+Full (all features)       29 feat   AUC 0.6932 +/- 0.0012   [min 0.6916, max 0.6955]
+
+Paired per-seed deltas (same seed, same split)
+  + Physiological Load vs Ranking only       mean +0.0064 +/- 0.0014   positive in 21/21 seeds
+  + Form vs + Physiological Load             mean +0.0057 +/- 0.0014   positive in 21/21 seeds
+  + H2H + Quality vs + Form                  mean +0.0002 +/- 0.0015   positive in 12/21 seeds
+  Full (all features) vs + H2H + Quality     mean -0.0000 +/- 0.0009   positive in 12/21 seeds
+  all features vs ranking alone              mean +0.0123 +/- 0.0015   positive in 21/21 seeds
+
+Paired bootstrap, predictions averaged over all seeds (primary)
+  + Physiological Load vs Ranking only
+    delta AUC +0.0073   95% CI [+0.0008, +0.0136]   P(delta > 0) = 0.986   resamples kept 2000
+    Does not cross zero on this hold-out
+  + Form vs + Physiological Load
+    delta AUC +0.0057   95% CI [+0.0015, +0.0099]   P(delta > 0) = 0.993   resamples kept 2000
+    Does not cross zero on this hold-out
+  + H2H + Quality vs + Form
+    delta AUC +0.0003   95% CI [-0.0024, +0.0031]   P(delta > 0) = 0.580   resamples kept 2000
+    CROSSES ZERO: not distinguishable from zero on this hold-out
+  Full (all features) vs + H2H + Quality
+    delta AUC +0.0000   95% CI [-0.0004, +0.0005]   P(delta > 0) = 0.525   resamples kept 2000
+    CROSSES ZERO: not distinguishable from zero on this hold-out
+  all features vs ranking alone
+    delta AUC +0.0132   95% CI [+0.0051, +0.0209]   P(delta > 0) = 1.000   resamples kept 2000
+    Does not cross zero on this hold-out
+
+Paired bootstrap, seed 42 only (sensitivity check)
+  + Physiological Load vs Ranking only
+    delta AUC +0.0094   95% CI [+0.0020, +0.0165]   P(delta > 0) = 0.994   resamples kept 2000
+    Does not cross zero on this hold-out
+  + Form vs + Physiological Load
+    delta AUC +0.0031   95% CI [-0.0017, +0.0080]   P(delta > 0) = 0.900   resamples kept 2000
+    CROSSES ZERO: not distinguishable from zero on this hold-out
+  + H2H + Quality vs + Form
+    delta AUC +0.0022   95% CI [-0.0014, +0.0057]   P(delta > 0) = 0.888   resamples kept 2000
+    CROSSES ZERO: not distinguishable from zero on this hold-out
+  Full (all features) vs + H2H + Quality
+    delta AUC +0.0003   95% CI [-0.0018, +0.0023]   P(delta > 0) = 0.599   resamples kept 2000
+    CROSSES ZERO: not distinguishable from zero on this hold-out
+  all features vs ranking alone
+    delta AUC +0.0149   95% CI [+0.0062, +0.0232]   P(delta > 0) = 1.000   resamples kept 2000
+    Does not cross zero on this hold-out
+
+Elapsed 283s
