@@ -117,9 +117,12 @@ zero-crossing verdicts are the findings, not the individual digits.
 
 Data provenance: the upstream `JeffSackmann/tennis_atp` repository no longer
 resolves. Match data for 2018 to 2024 is read from a fork of it pinned at commit
-`6b9482f`. That fork has not been independently verified against any other copy
-of the original dataset, so the data's fidelity to Sackmann's released files is
-assumed rather than established.
+`6b9482f`. A cross-check against an independent fork, mneedham/tennis_atp, was
+inconclusive: it shares the 49-column schema but is a snapshot of an earlier
+upstream revision, differing in every data row for an overlapping season and
+missing 2023 and 2024 entirely. Sackmann revised these files over time and no
+authoritative copy remains reachable, so the data's fidelity to his released
+files cannot be established, only assumed.
 
 ## Data Sources
 

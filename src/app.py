@@ -1,6 +1,7 @@
 """
 ATP Fatigue Forecaster - Research-Grade ML Dashboard
-Built on real rolling physiological load features from JeffSackmann/tennis_atp.
+Built on real rolling physiological load features from a pinned fork of
+JeffSackmann/tennis_atp, since upstream no longer resolves.
 
 v4 upgrades:
   - Model Performance tab with baseline comparisons (Higher-Rank, Rank-Logistic, Elo)
@@ -1053,7 +1054,7 @@ def main():
                 📄 &nbsp;<span style="color:#C4622D;">"The Breaking Point"</span> - NHSJS, 2026
             </div>
             <div style="font-family: 'DM Mono', monospace; font-size: 11px; color: #7A7A7A;">
-                📊 &nbsp;Data: Jeff Sackmann's tennis_atp, read from a pinned fork since upstream is no longer reachable (8-year ATP match records) + Match Charting Project
+                📊 &nbsp;Data: Jeff Sackmann's tennis_atp, read from a pinned fork since upstream is no longer reachable (2018-2024 ATP match records) + Match Charting Project
             </div>
             <div style="font-family: 'DM Mono', monospace; font-size: 11px; color: #7A7A7A;">
                 🧠 &nbsp;Model: Calibrated Gradient Boosting · PRISMA-guided feature design
@@ -1062,7 +1063,7 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    with st.spinner("Loading ATP match history (8 years for accurate H2H)..."):
+    with st.spinner("Loading ATP match history (2018-2024 for accurate H2H)..."):
         df_raw = load_raw_data(years=8)
     if df_raw.empty:
         st.error("Could not reach the upstream data repository. Check your internet connection.")
@@ -1547,7 +1548,7 @@ Verified empirically via reliability diagram and Brier score.
 
 **Data Source**
 
-Jeff Sackmann's tennis_atp dataset - 8 years of ATP match records. The upstream JeffSackmann/tennis_atp repository
+Jeff Sackmann's tennis_atp dataset - seven seasons of ATP match records, 2018 to 2024. The upstream JeffSackmann/tennis_atp repository
 is no longer reachable, so the app reads from a
 [fork pinned at commit 6b9482f](https://github.com/vishaan2010-dotcom/tennis_atp/tree/6b9482f815bb930cfbffd38ddeac6225ea132bb3).
             """)
